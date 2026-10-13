@@ -1,0 +1,10 @@
+{
+  "opml_path": "user-data/subscriptions.opml",
+  "feed_cache_dir": "user-data/cache",
+  "episode_candidates_html": "user-data/episode-candidates.html",
+  "poster_history_dir": "user-data/history/posters",
+  "output_pdf": "user-data/podcast-poster.pdf",
+  "poster_title": "EPISODES WORTH LISTENING TO THIS {period}",
+  "poster_period": "month",
+  "slots": []
+}
