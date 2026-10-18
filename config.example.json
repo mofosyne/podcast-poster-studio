@@ -7,6 +7,7 @@
   "poster_title": "EPISODES WORTH LISTENING TO THIS {period}",
   "poster_period": "month",
   "poster_layout": "list",
+  "poster_theme": "dark",
   "single_poster_title": "ONE EPISODE WORTH YOUR TIME",
   "subscription_metadata": {},
   "llm": {"enabled": false},

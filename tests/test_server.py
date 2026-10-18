@@ -79,9 +79,10 @@ class LocalWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.normalize_tags(["x" * (server.MAX_TAG_LENGTH + 1)])
 
-    def test_validate_slots_rejects_more_than_eight_or_long_summaries(self):
+    def test_validate_slots_rejects_more_than_six_or_long_summaries(self):
+        self.assertEqual(len(server.validate_slots([self.make_slot()] * 6)), 6)
         with self.assertRaises(ValueError):
-            server.validate_slots([self.make_slot()] * 9)
+            server.validate_slots([self.make_slot()] * 7)
 
         slot = self.make_slot()
         slot["summary"] = "x" * 400
@@ -235,6 +236,75 @@ class LocalWorkflowTests(unittest.TestCase):
             self.assertEqual(diagnostic["endpoint"], server.llm_endpoint_label(base_url))
             self.assertIsInstance(diagnostic["duration_ms"], int)
             self.assertNotIn(episode["description"], json.dumps(diagnostic))
+
+    def test_channel_metadata_suggestions_use_feed_context_without_saving(self):
+        class MockResponse:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, maximum):
+                return self.body
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            opml_path = root / "subscriptions.opml"
+            feed_url = "https://example.test/feed.xml"
+            opml_path.write_text(
+                f'<opml><body><outline text="Example Show" xmlUrl="{feed_url}"/></body></opml>',
+                encoding="utf-8",
+            )
+            candidate_path = root / "episode-candidates.html"
+            candidate_path.write_text(
+                "const EPISODES = " + json.dumps([{
+                    "feed_url": feed_url,
+                    "episode": "Local climate policy",
+                    "description": "A discussion of community climate action.",
+                    "feed_description": "Independent reporting about environmental policy.",
+                }]) + "; const list = document.getElementById('list');",
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "opml_path": str(opml_path),
+                "episode_candidates_html": str(candidate_path),
+                "subscription_metadata": {},
+                "llm": {
+                    "enabled": True,
+                    "base_url": "http://127.0.0.1:8080/v1",
+                    "api_format": "openai-compatible",
+                    "model": "local-model",
+                },
+            }), encoding="utf-8")
+            content = json.dumps({
+                "channel_description": "Independent reporting on environmental policy and local climate action.",
+                "tags": ["Environment", "Climate Policy"],
+            })
+            response_body = json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+
+            with (
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "BASE_DIR", root),
+                patch.object(server, "USER_DATA_DIR", root / "user-data"),
+                patch.dict(server.os.environ, {}, clear=True),
+                patch.object(server, "urlopen", return_value=MockResponse(response_body)) as urlopen_mock,
+            ):
+                result = server.generate_llm_channel_suggestion({"feed_url": feed_url})
+                saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["channel_description"], "Independent reporting on environmental policy and local climate action.")
+        self.assertEqual(result["tags"], ["Environment", "Climate Policy"])
+        self.assertEqual(saved_config["subscription_metadata"], {})
+        request = urlopen_mock.call_args.args[0]
+        request_body = json.loads(request.data)
+        prompt = request_body["messages"][1]["content"]
+        self.assertIn("Independent reporting about environmental policy", prompt)
+        self.assertIn("community climate action", prompt)
 
     def test_qwen3_openai_suggestions_disable_template_thinking(self):
         class MockResponse:
@@ -425,9 +495,27 @@ class LocalWorkflowTests(unittest.TestCase):
                 f'<opml><body><outline text="Example Show" xmlUrl="{feed_url}"/></body></opml>',
                 encoding="utf-8",
             )
-            config_path.write_text(json.dumps({"opml_path": str(opml_path)}), encoding="utf-8")
+            artwork_path = root / "user-data" / "cache" / "artwork" / "cover.png"
+            artwork_path.parent.mkdir(parents=True)
+            artwork_path.write_bytes(b"cached artwork")
+            candidate_path = root / "episode-candidates.html"
+            candidate_path.write_text(
+                "const EPISODES = " + json.dumps([{
+                    "feed_url": feed_url,
+                    "channel_artwork_path": "user-data/cache/artwork/cover.png",
+                }]) + "; const list = document.getElementById('list');",
+                encoding="utf-8",
+            )
+            config_path.write_text(json.dumps({
+                "opml_path": str(opml_path),
+                "episode_candidates_html": str(candidate_path),
+            }), encoding="utf-8")
 
-            with patch.object(server, "CONFIG_PATH", config_path), patch.object(server, "BASE_DIR", root):
+            with (
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "BASE_DIR", root),
+                patch.object(server, "USER_DATA_DIR", root / "user-data"),
+            ):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.LocalHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
                 thread.start()
@@ -455,6 +543,13 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["tags"], ["Environment"])
         self.assertEqual(subscriptions["feeds"][0]["channel_description"], "Greens-affiliated podcast.")
         self.assertEqual(subscriptions["feeds"][0]["tags"], ["Environment"])
+        self.assertEqual(subscriptions["feeds"][0]["artwork_url"], "/cache/artwork/cover.png")
+
+    def test_poster_theme_validation_rejects_unknown_values(self):
+        self.assertEqual(server.validate_poster_theme("dark"), "dark")
+        self.assertEqual(server.validate_poster_theme("ink-saving"), "ink-saving")
+        with self.assertRaises(ValueError):
+            server.validate_poster_theme("sepia")
 
     def test_single_layout_requires_exactly_one_episode(self):
         self.assertEqual(server.validate_slots([self.make_slot()], "single")[0]["type"], "fixed")
@@ -474,6 +569,7 @@ class LocalWorkflowTests(unittest.TestCase):
                 "poster_title": "Episodes {period}",
                 "poster_period": "month",
                 "poster_layout": "list",
+                "poster_theme": "dark",
                 "poster_history_dir": str(history_path),
                 "output_pdf": str(root / "preview.pdf"),
                 "slots": [],
@@ -494,11 +590,12 @@ class LocalWorkflowTests(unittest.TestCase):
                 patch.object(server, "BASE_DIR", root),
                 patch.object(server.subprocess, "run", side_effect=fake_run),
             ):
-                result = server.preview_poster([self.make_slot()], "list")
+                result = server.preview_poster([self.make_slot()], "list", "ink-saving")
 
             self.assertEqual(config_path.read_text(encoding="utf-8"), original_config)
             self.assertFalse(subprocess_call["temporary_config"].exists())
             self.assertEqual(subprocess_call["preview_config"]["slots"][0]["episode"], "Example episode")
+            self.assertEqual(subprocess_call["preview_config"]["poster_theme"], "ink-saving")
             self.assertIn("--preview", subprocess_call["command"])
             self.assertTrue(result["preview"])
             self.assertFalse(history_path.exists())
@@ -544,6 +641,7 @@ class LocalWorkflowTests(unittest.TestCase):
                 "artwork": "cache/artwork/cover.png",
             }
             stale_page = (
+                '<body data-page-version="14">'
                 '<div class="status">1 episodes from 1 feeds · 0 previously posted · generated '
                 'October 12, 2026 · 1 cached feeds, 0 unavailable</div>\n'
                 f"<script>const EPISODES = {json.dumps([episode])}; const list = document.getElementById('list');</script>"
@@ -574,9 +672,12 @@ class LocalWorkflowTests(unittest.TestCase):
 
             saved_page = candidate_path.read_text(encoding="utf-8")
 
-        self.assertIn('data-page-version="13"', page)
+        self.assertIn('data-page-version="16"', page)
+        self.assertIn("choose up to six for the poster", page)
         self.assertIn("candidate-selection", page)
+        self.assertIn('id="bulkSuggestionBatchSize"', page)
         self.assertIn("user-data/cache/artwork/cover.png", page)
+        self.assertIn("channel_artwork_path", page)
         self.assertIn("A saved episode", page)
         self.assertIn("Details including ]; const list = survive the page upgrade.", page)
         self.assertIn("Edit selection tab", page)
@@ -614,6 +715,10 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertIn("0 · Subscriptions", page)
         self.assertIn("Merge (keep existing, add new)", page)
         self.assertIn("Edit channel description and tags", page)
+        self.assertIn("Process subscription", page)
+        self.assertIn("subscriptionBatchSize", page)
+        self.assertIn("processMissingSubscriptions", page)
+        self.assertIn("/api/llm/channel-suggest", page)
         self.assertIn("/api/subscriptions/metadata", page)
         self.assertIn("Export OPML", page)
         self.assertIn("Review episodes", page)
@@ -770,12 +875,13 @@ class LocalWorkflowTests(unittest.TestCase):
             config_path.write_text(json.dumps({"poster_period": "month", "slots": []}), encoding="utf-8")
 
             with patch.object(server, "CONFIG_PATH", config_path):
-                server.save_slots([self.make_slot()], "single")
+                server.save_slots([self.make_slot()], "single", "ink-saving")
 
             saved = json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertEqual(saved["poster_period"], "month")
         self.assertEqual(saved["poster_layout"], "single")
+        self.assertEqual(saved["poster_theme"], "ink-saving")
         self.assertEqual(saved["slots"][0]["summary"], "A short curated summary.")
 
     def test_printed_state_is_persisted_in_the_history_manifest(self):

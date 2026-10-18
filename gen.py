@@ -27,6 +27,7 @@ from fetch_episodes import scan_feed
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("PODCAST_POSTER_CONFIG", BASE_DIR / "user-data" / "config.json"))
 MAX_DOWNLOAD_BYTES = 15 * 1024 * 1024
+MAX_POSTER_SLOTS = 6
 USER_AGENT = "PodcastPoster/1.0 (local poster generator)"
 
 argument_parser = argparse.ArgumentParser(description="Generate a podcast poster PDF.")
@@ -42,14 +43,53 @@ with CONFIG_PATH.open(encoding="utf-8") as f:
 slots = config.get("slots", [])
 if not slots:
     raise SystemExit("user-data/config.json must define at least one poster slot")
-if len(slots) > 8:
-    raise SystemExit("user-data/config.json supports at most eight poster slots")
+if len(slots) > MAX_POSTER_SLOTS:
+    raise SystemExit(f"user-data/config.json supports at most {MAX_POSTER_SLOTS} poster slots")
 
 poster_layout = config.get("poster_layout", "list")
 if poster_layout not in {"list", "single"}:
     raise SystemExit('user-data/config.json "poster_layout" must be "list" or "single"')
 if poster_layout == "single" and len(slots) != 1:
     raise SystemExit('A "single" poster layout requires exactly one configured slot')
+
+poster_theme = config.get("poster_theme", "dark")
+if poster_theme not in {"dark", "ink-saving"}:
+    raise SystemExit('user-data/config.json "poster_theme" must be "dark" or "ink-saving"')
+
+THEME_PALETTES = {
+    "dark": {
+        "background": "#1a1a1a",
+        "primary": "#ffffff",
+        "secondary": "#aaaaaa",
+        "muted": "#888888",
+        "summary": "#c4ceca",
+        "accent": "#4fd1c5",
+        "divider": "#333333",
+        "placeholder_background": "#172b2a",
+        "placeholder_ring": "#28514d",
+        "placeholder_text": "#f0f5f4",
+        "tag_text": "#ffffff",
+        "tag_fills": ("#135a70", "#58407d", "#386044", "#895124", "#7a354a", "#354d82", "#6d5b20", "#285f58"),
+    },
+    "ink-saving": {
+        "background": "#ffffff",
+        "primary": "#171a19",
+        "secondary": "#444b48",
+        "muted": "#5b625f",
+        "summary": "#303633",
+        "accent": "#00695c",
+        "divider": "#d5d9d7",
+        "placeholder_background": "#ffffff",
+        "placeholder_ring": "#a9c3bd",
+        "placeholder_text": "#28312e",
+        "tag_text": "#25312d",
+        "tag_fills": ("#d9ecff", "#f2ddf5", "#dcf1df", "#ffebd5", "#f8dce4", "#e0e7ff", "#f5efcf", "#d5f0eb"),
+    },
+}
+THEME_COLORS = THEME_PALETTES[poster_theme]
+TAG_BUBBLE_HEIGHT = 5 * mm
+TAG_BUBBLE_LINE_STEP = 6 * mm
+TAG_BUBBLE_HORIZONTAL_PADDING = 3.5
 
 poster_period = config.get("poster_period", "month").lower()
 if poster_period not in {"month", "week"}:
@@ -144,6 +184,7 @@ def archive_generation(pdf_path, items):
         "printed_at": None,
         "title": poster_title,
         "layout": poster_layout,
+        "theme": poster_theme,
         "period": poster_period,
         "edition": edition_label,
         "pdf": archive_pdf.name,
@@ -230,7 +271,7 @@ def artwork_for(item):
 
     cache_key = feed_url or page_url
     cache_dir = project_path("feed_cache_dir") / "artwork"
-    cache_path = cache_dir / f"{hashlib.sha256(cache_key.encode()).hexdigest()}.png"
+    cache_path = cache_dir / f"{hashlib.sha256(cache_key.encode()).hexdigest()}-v2.png"
     if cache_path.is_file():
         return cache_path
 
@@ -254,9 +295,7 @@ def artwork_for(item):
 
         with Image.open(BytesIO(image_data)) as source:
             rgba = source.convert("RGBA")
-            background = Image.new("RGB", rgba.size, "#111412")
-            background.paste(rgba, mask=rgba.getchannel("A"))
-            artwork = ImageOps.fit(background, (512, 512))
+            artwork = ImageOps.fit(rgba, (512, 512))
         cache_dir.mkdir(parents=True, exist_ok=True)
         artwork.save(cache_path, format="PNG", optimize=True)
         print(f"Artwork cached for {item['show']}")
@@ -268,7 +307,7 @@ def artwork_for(item):
 
 def draw_placeholder_artwork(pdf, x, y, size, show):
     pdf.saveState()
-    pdf.setFillColor(colors.HexColor("#172b2a"))
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["placeholder_background"]))
     pdf.roundRect(x, y, size, size, 2 * mm, fill=1, stroke=0)
 
     digest = hashlib.sha256(show.casefold().encode("utf-8")).digest()
@@ -277,7 +316,7 @@ def draw_placeholder_artwork(pdf, x, y, size, show):
 
     center_x = x + size / 2
     center_y = y + size * 0.70
-    pdf.setStrokeColor(colors.HexColor("#28514d"))
+    pdf.setStrokeColor(colors.HexColor(THEME_COLORS["placeholder_ring"]))
     pdf.setLineWidth(0.7)
     for radius in (size * 0.18, size * 0.29):
         pdf.circle(center_x, center_y, radius, stroke=1, fill=0)
@@ -324,7 +363,7 @@ def draw_placeholder_artwork(pdf, x, y, size, show):
 
     leading = font_size * 1.08
     text_y = y + size * 0.055 + (len(title_lines) - 1) * leading
-    pdf.setFillColor(colors.HexColor("#f0f5f4"))
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["placeholder_text"]))
     pdf.setFont("Helvetica-Bold", font_size)
     for line in title_lines:
         pdf.drawCentredString(center_x, text_y, line)
@@ -343,38 +382,79 @@ def fit_pdf_text(pdf, text, font_name, font_size, max_width):
     return text.rstrip() + suffix
 
 
+def draw_tag_bubbles(pdf, tags, x, top_y, max_width, max_rows, font_size=7):
+    cleaned_tags = ["#" + "_".join(str(tag).split()) for tag in tags if str(tag).strip()]
+    if not cleaned_tags or max_width <= 0 or max_rows <= 0:
+        return top_y, 0
+
+    pad_x = TAG_BUBBLE_HORIZONTAL_PADDING
+    bubble_h = TAG_BUBBLE_HEIGHT
+    gap_x = 2 * mm
+    line_step = TAG_BUBBLE_LINE_STEP
+    cursor_x = x
+    row = 0
+    palette = THEME_COLORS["tag_fills"]
+    pdf.setFont("Helvetica-Bold", font_size)
+
+    for tag in cleaned_tags:
+        digest = hashlib.sha256(tag.casefold().encode("utf-8")).digest()
+        fill = colors.HexColor(palette[int.from_bytes(digest[:2], "big") % len(palette)])
+        tag_width = pdf.stringWidth(tag, "Helvetica-Bold", font_size) + 2 * pad_x
+        if tag_width > max_width:
+            tag = fit_pdf_text(pdf, tag, "Helvetica-Bold", font_size, max_width - 2 * pad_x)
+            tag_width = pdf.stringWidth(tag, "Helvetica-Bold", font_size) + 2 * pad_x
+        if cursor_x > x and cursor_x + tag_width > x + max_width:
+            row += 1
+            if row >= max_rows:
+                break
+            cursor_x = x
+        if cursor_x + tag_width > x + max_width:
+            break
+
+        bubble_y = top_y - row * line_step - bubble_h
+        pdf.setFillColor(fill)
+        pdf.roundRect(cursor_x, bubble_y, tag_width, bubble_h, bubble_h / 2, fill=1, stroke=0)
+        pdf.setFillColor(colors.HexColor(THEME_COLORS["tag_text"]))
+        text_y = bubble_y + (bubble_h - font_size) / 2 + 0.5
+        pdf.drawString(cursor_x + pad_x, text_y, tag)
+        cursor_x += tag_width + gap_x
+
+    rows = min(row + 1, max_rows)
+    return top_y - rows * line_step, rows
+
+
 def draw_single_poster(pdf, item):
     margin = 18 * mm
     title = poster_title
     title_size = 28
     while pdf.stringWidth(title, "Helvetica-Bold", title_size) > W - 2 * margin:
         title_size -= 0.5
-    pdf.setFillColor(colors.white)
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
     pdf.setFont("Helvetica-Bold", title_size)
     pdf.drawCentredString(W / 2, H - margin - 10 * mm, title)
-    pdf.setFillColor(colors.HexColor("#4fd1c5"))
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     pdf.setFont("Helvetica-Bold", 11)
     show_name = fit_pdf_text(pdf, item["show"], "Helvetica-Bold", 11, W - 2 * margin)
     pdf.drawCentredString(W / 2, H - margin - 19 * mm, show_name)
-    tags = ["#" + "_".join(str(tag).split()) for tag in item.get("tags", []) if str(tag).strip()]
-    if tags:
-        pdf.setFillColor(colors.HexColor("#9ba79f"))
-        pdf.setFont("Helvetica", 8)
-        pdf.drawCentredString(W / 2, H - margin - 25 * mm, fit_pdf_text(pdf, " ".join(tags), "Helvetica", 8, W - 2 * margin))
+    tags_top = H - margin - 22 * mm
+    _, tag_rows = draw_tag_bubbles(
+        pdf, item.get("tags", []), margin, tags_top, W - 2 * margin, max_rows=2, font_size=7
+    )
 
     artwork_size = 96 * mm
     artwork_x = (W - artwork_size) / 2
-    artwork_y = H - margin - 31 * mm - artwork_size
+    artwork_top = H - margin - (31 + tag_rows * TAG_BUBBLE_LINE_STEP / mm) * mm
+    artwork_y = artwork_top - artwork_size
     artwork_path = artwork_for(item)
     if artwork_path:
-        pdf.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size)
+        pdf.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size, mask="auto")
     else:
         draw_placeholder_artwork(pdf, artwork_x, artwork_y, artwork_size, item["show"])
 
     content_width = W - 2 * margin
     title_lines = wrap_pdf_text(pdf, item["episode"], "Helvetica-Bold", 20, content_width, 3)
     title_y = artwork_y - 12 * mm
-    pdf.setFillColor(colors.white)
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
     pdf.setFont("Helvetica-Bold", 20)
     for line in title_lines:
         pdf.drawCentredString(W / 2, title_y, line)
@@ -383,7 +463,7 @@ def draw_single_poster(pdf, item):
     summary = str(item.get("summary") or "").strip()
     if summary:
         summary_lines = wrap_pdf_text(pdf, summary, "Helvetica", 10, content_width - 14 * mm, 8)
-        pdf.setFillColor(colors.HexColor("#c4ceca"))
+        pdf.setFillColor(colors.HexColor(THEME_COLORS["summary"]))
         pdf.setFont("Helvetica", 10)
         summary_y = title_y - 2 * mm
         for line in summary_lines:
@@ -395,7 +475,7 @@ def draw_single_poster(pdf, item):
 
     episode_date = item.get("date", "")
     if episode_date:
-        pdf.setFillColor(colors.HexColor("#999999"))
+        pdf.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
         pdf.setFont("Helvetica", 10)
         pdf.drawCentredString(W / 2, detail_y, episode_date)
 
@@ -413,7 +493,7 @@ def draw_single_poster(pdf, item):
     while pdf.stringWidth(item["url"], "Helvetica", url_font_size) > W - 2 * margin - qr_size - 8 * mm and url_font_size > 6:
         url_font_size -= 0.25
     url_y = qr_y + qr_size / 2
-    pdf.setFillColor(colors.HexColor("#4fd1c5"))
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     pdf.setFont("Helvetica", url_font_size)
     pdf.drawString(margin, url_y, fit_pdf_text(pdf, item["url"], "Helvetica", url_font_size, W - 2 * margin - qr_size - 8 * mm))
     pdf.linkURL(item["url"], (margin, url_y - 0.6 * mm, margin + url_width, url_y + 2.4 * mm), relative=0, thickness=0)
@@ -455,18 +535,18 @@ W, H = A4
 c = canvas.Canvas(str(output_pdf), pagesize=A4)
 
 margin = 18 * mm
-c.setFillColor(colors.HexColor("#1a1a1a"))
+c.setFillColor(colors.HexColor(THEME_COLORS["background"]))
 c.rect(0, 0, W, H, fill=1, stroke=0)
 
 if poster_layout == "list":
-    c.setFillColor(colors.white)
+    c.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
     title_font_size = 30
     while c.stringWidth(poster_title, "Helvetica-Bold", title_font_size) > W - 2 * margin:
         title_font_size -= 0.5
     c.setFont("Helvetica-Bold", title_font_size)
     c.drawCentredString(W / 2, H - margin - 10 * mm, poster_title)
     c.setFont("Helvetica", 12)
-    c.setFillColor(colors.HexColor("#aaaaaa"))
+    c.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
     c.drawCentredString(W / 2, H - margin - 18 * mm, "A curated selection of episodes - scan to listen")
 
 row_h = (H - margin * 2 - 28 * mm) / len(data)
@@ -483,7 +563,7 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     artwork_y = y_center - artwork_size / 2
 
     if artwork_path:
-        c.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size)
+        c.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size, mask="auto")
     else:
         draw_placeholder_artwork(c, artwork_x, artwork_y, artwork_size, item["show"])
 
@@ -501,51 +581,56 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     text_x = artwork_x + artwork_size + 7 * mm
     text_w = qr_x - 7 * mm - text_x
 
-    tags = ["#" + "_".join(str(tag).split()) for tag in item.get("tags", []) if str(tag).strip()]
-    tag_label = fit_pdf_text(c, " ".join(tags), "Helvetica", 8, text_w * 0.42) if tags else ""
-    tag_width = c.stringWidth(tag_label, "Helvetica", 8) if tag_label else 0
-    show_width = max(text_w - tag_width - 3 * mm, text_w * 0.5)
-    c.setFillColor(colors.HexColor("#4fd1c5"))
+    c.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     c.setFont("Helvetica-Bold", 16)
-    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", 16, show_width)
+    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", 16, text_w)
     c.drawString(text_x, text_center + 8 * mm, show_name)
-    if tag_label:
-        c.setFillColor(colors.HexColor("#9ba79f"))
-        c.setFont("Helvetica", 8)
-        c.drawRightString(text_x + text_w, text_center + 8 * mm, tag_label)
 
-    c.setFillColor(colors.white)
     summary = str(item.get("summary") or "").strip()
-    if summary:
-        title_font_size = 11
-        c.setFont("Helvetica", title_font_size)
-        title = fit_pdf_text(c, item["episode"], "Helvetica", title_font_size, text_w)
-        c.drawString(text_x, text_center + 2.5 * mm, title)
-
-        summary_font_size = 7.5
-        c.setFont("Helvetica", summary_font_size)
-        c.setFillColor(colors.HexColor("#c4ceca"))
-        summary_y = text_center - 1.5 * mm
-        row_bottom = y_top - row_h
-        summary_leading = 3.2 * mm
-        available_lines = int((summary_y - (row_bottom + 10 * mm)) / summary_leading) + 1
-        max_summary_lines = max(1, min(12, available_lines))
-        summary_lines = wrap_pdf_text(
-            c, summary, "Helvetica", summary_font_size, text_w, max_summary_lines
-        )
-        for summary_line in summary_lines:
-            c.drawString(text_x, summary_y, summary_line)
-            summary_y -= summary_leading
-        date_y = summary_y - 1.5 * mm
+    title_font_size = 11
+    c.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
+    c.setFont("Helvetica", title_font_size)
+    if row_h >= 45 * mm:
+        title_lines = wrap_pdf_text(c, item["episode"], "Helvetica", title_font_size, text_w, 2)
     else:
-        c.setFont("Helvetica", 12)
-        lines = wrap_pdf_text(c, item["episode"], "Helvetica", 12, text_w, 2)
-        line_y = text_center
-        for line in lines:
-            c.drawString(text_x, line_y, line)
-            line_y -= 5.5 * mm
-        date_y = line_y - 2 * mm
-    c.setFillColor(colors.HexColor("#888888"))
+        title_lines = [fit_pdf_text(c, item["episode"], "Helvetica", title_font_size, text_w)]
+    title_y = text_center + 2.5 * mm
+    title_leading = 4.5 * mm
+    for title_line in title_lines:
+        c.drawString(text_x, title_y, title_line)
+        title_y -= title_leading
+
+    tag_top = title_y + title_leading - 1.5 * mm
+    row_bottom = y_top - row_h
+    date_y = row_bottom + 8.5 * mm
+    max_tag_rows = max(
+        0,
+        min(
+            5,
+            int((tag_top - TAG_BUBBLE_HEIGHT - (date_y + 2.5 * mm)) / TAG_BUBBLE_LINE_STEP) + 1,
+        ),
+    )
+    tags_bottom, _ = draw_tag_bubbles(
+        c, item.get("tags", []), text_x, tag_top, text_w, max_rows=max_tag_rows, font_size=7
+    )
+
+    if summary:
+        summary_font_size = 7.5
+        summary_leading = 3.2 * mm
+        summary_y = tags_bottom - 2 * mm
+        available_lines = int((summary_y - (date_y + 3 * mm)) / summary_leading) + 1
+        max_summary_lines = max(0, min(12, available_lines))
+        if max_summary_lines:
+            c.setFillColor(colors.HexColor(THEME_COLORS["summary"]))
+            c.setFont("Helvetica", summary_font_size)
+            summary_lines = wrap_pdf_text(
+                c, summary, "Helvetica", summary_font_size, text_w, max_summary_lines
+            )
+            for summary_line in summary_lines:
+                c.drawString(text_x, summary_y, summary_line)
+                summary_y -= summary_leading
+
+    c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
     c.setFont("Helvetica-Oblique", 10)
     c.drawString(text_x, date_y, item["date"])
 
@@ -557,8 +642,8 @@ for i, item in enumerate(data if poster_layout == "list" else []):
         url_font_size -= 0.25
     visible_url = fit_pdf_text(c, item["url"], "Helvetica", url_font_size, url_max_width)
     url_width = c.stringWidth(visible_url, "Helvetica", url_font_size)
-    url_y = y_top - row_h + 4 * mm if use_full_width_url else date_y - 3.5 * mm
-    c.setFillColor(colors.HexColor("#4fd1c5"))
+    url_y = row_bottom + 5 * mm
+    c.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     c.setFont("Helvetica", url_font_size)
     c.drawString(url_x, url_y, visible_url)
     c.linkURL(
@@ -569,13 +654,13 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     )
 
     if i < len(data) - 1:
-        c.setStrokeColor(colors.HexColor("#333333"))
+        c.setStrokeColor(colors.HexColor(THEME_COLORS["divider"]))
         c.line(margin, y_top - row_h, W - margin, y_top - row_h)
 
 if poster_layout == "single":
     draw_single_poster(c, data[0])
 
-c.setFillColor(colors.HexColor("#666666"))
+c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
 c.setFont("Helvetica", 9)
 c.drawCentredString(W / 2, margin / 2, edition_label)
 

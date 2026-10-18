@@ -69,8 +69,10 @@ main{max-width:980px;margin:36px auto;padding:0 22px}
 h1{margin:0;font-size:clamp(25px,4vw,38px);letter-spacing:.02em}
 .subtitle{color:var(--muted);margin:5px 0 22px}
 .status{color:var(--muted);font-size:13px;margin-bottom:18px}
-.controls{display:flex;gap:10px;margin-bottom:18px}
+.controls{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}
 input[type=search]{flex:1;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:11px 13px;font:inherit}
+.batch-size-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;white-space:nowrap}
+.batch-size-control input{width:72px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px;font:inherit}
 button{background:var(--accent);color:#10201d;border:0;border-radius:7px;padding:10px 15px;font-weight:700;cursor:pointer}
 button:disabled{opacity:.4;cursor:default}
 .episode{display:grid;grid-template-columns:26px 64px minmax(0,1fr) auto;gap:12px;align-items:start;padding:15px 14px;border-top:1px solid var(--line)}
@@ -121,13 +123,13 @@ a:hover{color:var(--accent);text-decoration:underline}
 @media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date{grid-column:3}.controls{flex-wrap:wrap}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
 </style>
 </head>
-<body data-page-version="13">
+<body data-page-version="16">
 <main>
   <h1>Podcast episode archive</h1>
-  <p class="subtitle">Browse the full episode history available from your subscriptions and choose up to eight for the poster.</p>
+  <p class="subtitle">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
   <div class="status">__EPISODE_COUNT__ episodes from __FEED_COUNT__ feeds · __POSTED_COUNT__ previously posted · generated __GENERATED__ · __CACHE_STATUS__</div>
-  <div class="controls" id="controls"><input id="search" type="search" placeholder="Filter by show or episode title"><button id="clear">Clear selection</button><button id="suggestUnprocessed" type="button" hidden>Process newest 25</button><button id="stopBulkSuggestions" type="button" hidden>Stop after current</button></div>
-  <div id="bulkSuggestionStatus" class="bulk-suggestion-status" aria-live="polite">Each run processes at most 25 newest episodes. Start another batch when you are ready.</div>
+  <div class="controls" id="controls"><input id="search" type="search" placeholder="Filter by show or episode title"><button id="clear">Clear selection</button><label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" max="25" step="1" value="10"></label><button id="suggestUnprocessed" type="button" hidden>Process newest 10</button><button id="stopBulkSuggestions" type="button" hidden>Stop after current</button></div>
+  <div id="bulkSuggestionStatus" class="bulk-suggestion-status" aria-live="polite">Choose how many of the newest eligible episodes to process per batch (up to 25). Another batch starts only when you choose it.</div>
   <div id="list"></div>
   <div class="paging" id="paging"><button id="previousPage" type="button">Previous</button><span id="pageStatus"></span><button id="nextPage" type="button">Next</button></div>
   <section id="selectionReview" hidden>
@@ -156,13 +158,16 @@ const pageStatus = document.getElementById("pageStatus");
 const previousPage = document.getElementById("previousPage");
 const nextPage = document.getElementById("nextPage");
 const PAGE_SIZE = 200;
-const BULK_SUGGESTION_BATCH_SIZE = 25;
+const MAX_POSTER_SELECTION = 6;
+const MAX_BULK_SUGGESTION_BATCH_SIZE = 25;
 let currentPage = 0;
 const selection = new Set();
 const selectionLabel = document.getElementById("selection");
 const exportButton = document.getElementById("export");
 const toast = document.getElementById("toast");
 const suggestUnprocessedButton = document.getElementById("suggestUnprocessed");
+const bulkSuggestionBatchControl = document.getElementById("bulkSuggestionBatchControl");
+const bulkSuggestionBatchSize = document.getElementById("bulkSuggestionBatchSize");
 const stopBulkSuggestionsButton = document.getElementById("stopBulkSuggestions");
 const bulkSuggestionStatus = document.getElementById("bulkSuggestionStatus");
 const reviewedSummaries = new Map();
@@ -228,13 +233,21 @@ function updateSuggestionButtons(){
 
 function updateBulkSuggestionControls(){
   suggestUnprocessedButton.hidden = !runningInServer;
+  bulkSuggestionBatchControl.hidden = !runningInServer;
   stopBulkSuggestionsButton.hidden = !bulkSuggestionsRunning;
   stopBulkSuggestionsButton.disabled = stopBulkSuggestionsRequested;
   const pending = EPISODES.filter(episode => !suggestionIsCurrent(episode)).length;
+  const maximum = Math.min(MAX_BULK_SUGGESTION_BATCH_SIZE, pending);
+  let requested = Number.parseInt(bulkSuggestionBatchSize.value, 10);
+  if(!Number.isFinite(requested) || requested < 1) requested = Math.min(10, Math.max(1, maximum));
+  requested = Math.min(requested, Math.max(1, maximum));
+  bulkSuggestionBatchSize.max = String(Math.max(1, maximum));
+  bulkSuggestionBatchSize.value = String(requested);
+  bulkSuggestionBatchSize.disabled = !llmSuggestionsLoaded || pending === 0 || bulkSuggestionsRunning;
   suggestUnprocessedButton.textContent = !llmSuggestionsLoaded
     ? "Loading saved drafts…"
     : pending
-      ? `Process newest ${Math.min(BULK_SUGGESTION_BATCH_SIZE, pending)} of ${pending}`
+      ? `Process newest ${Math.min(requested, pending)} of ${pending}`
       : "All episodes have current drafts";
   suggestUnprocessedButton.disabled = !llmSuggestionsLoaded || !llmSuggestionsReady || pending === 0 || bulkSuggestionsRunning;
 }
@@ -312,7 +325,12 @@ async function processUnprocessedEpisodes(){
       return rightDate - leftDate;
     });
   const pendingTotal = pending.length;
-  const pendingIndices = pending.slice(0, BULK_SUGGESTION_BATCH_SIZE).map(({index}) => index);
+  const batchSize = Math.max(1, Math.min(
+    MAX_BULK_SUGGESTION_BATCH_SIZE,
+    pendingTotal,
+    Number.parseInt(bulkSuggestionBatchSize.value, 10) || 10
+  ));
+  const pendingIndices = pending.slice(0, batchSize).map(({index}) => index);
   if(!pendingIndices.length || bulkSuggestionsRunning) return;
   const approved = window.confirm(
     `Process only the newest ${pendingIndices.length} of ${pendingTotal} unprocessed or older-version episodes? ` +
@@ -423,9 +441,9 @@ function render(){
     checkbox.checked = selection.has(index);
     checkbox.setAttribute("aria-label", `Select ${episode.episode} from ${episode.show}`);
     checkbox.addEventListener("change", () => {
-      if(checkbox.checked && selection.size >= 8){
+      if(checkbox.checked && selection.size >= MAX_POSTER_SELECTION){
         checkbox.checked = false;
-        showToast("Select up to eight episodes for one poster.");
+        showToast(`Select up to ${MAX_POSTER_SELECTION} episodes for one poster.`);
         return;
       }
       if(checkbox.checked){
@@ -814,6 +832,7 @@ document.getElementById("backToEpisodes").addEventListener("click", () => {
   closeSelectionReview();
   if(runningInServer) window.parent.postMessage({type:"show-episodes-tab"}, window.location.origin);
 });
+bulkSuggestionBatchSize.addEventListener("input", updateBulkSuggestionControls);
 suggestUnprocessedButton.addEventListener("click", processUnprocessedEpisodes);
 stopBulkSuggestionsButton.addEventListener("click", () => {
   stopBulkSuggestionsRequested = true;
@@ -1049,10 +1068,7 @@ def cache_artwork_image(image_url, cache_path):
         if len(image_data) > MAX_ARTWORK_BYTES:
             raise ValueError("artwork image is larger than 15 MB")
         with Image.open(BytesIO(image_data)) as source:
-            rgba = source.convert("RGBA")
-            background = Image.new("RGB", rgba.size, "#111412")
-            background.paste(rgba, mask=rgba.getchannel("A"))
-            artwork = ImageOps.fit(background, (512, 512))
+            artwork = ImageOps.fit(source.convert("RGBA"), (512, 512))
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         artwork.save(cache_path, format="PNG", optimize=True)
         return cache_path, "downloaded"
@@ -1061,13 +1077,13 @@ def cache_artwork_image(image_url, cache_path):
 
 
 def cache_feed_artwork(feed_url, image_url, cache_dir):
-    cache_path = cache_dir / f"{hashlib.sha256(feed_url.encode()).hexdigest()}.png"
+    cache_path = cache_dir / f"{hashlib.sha256(feed_url.encode()).hexdigest()}-v2.png"
     return cache_artwork_image(image_url, cache_path)
 
 
 def cache_episode_artwork(image_url, cache_dir):
     digest = hashlib.sha256(image_url.encode()).hexdigest()
-    cache_path = cache_dir / f"episode-{digest}.png"
+    cache_path = cache_dir / f"episode-{digest}-v2.png"
     return cache_artwork_image(image_url, cache_path)
 
 
@@ -1346,7 +1362,13 @@ def main():
     for episode in episodes:
         episode.pop("artwork_url", None)
         episode_artwork_url = episode.pop("episode_artwork_url", None)
-        artwork_path = episode_artwork_paths.get(episode_artwork_url) or artwork_paths.get(episode["feed_url"])
+        channel_artwork_path = artwork_paths.get(episode["feed_url"])
+        if channel_artwork_path:
+            try:
+                episode["channel_artwork_path"] = Path(os.path.relpath(channel_artwork_path, BASE_DIR)).as_posix()
+            except ValueError:
+                pass
+        artwork_path = episode_artwork_paths.get(episode_artwork_url) or channel_artwork_path
         if artwork_path:
             try:
                 episode["artwork"] = Path(os.path.relpath(artwork_path, output_path.parent)).as_posix()

@@ -3,12 +3,16 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
 from xml.etree import ElementTree as ET
 
+from PIL import Image
+
 from fetch_episodes import (
+    cache_artwork_image,
     cache_feed_artwork,
     episode_description,
     episode_title_key,
@@ -127,10 +131,28 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("offline", error or "")
         self.assertEqual(episodes[0]["episode"], "Cached episode")
 
+    def test_cached_artwork_preserves_transparency_for_light_poster_themes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "artwork.png"
+            source = Image.new("RGBA", (512, 512), (30, 90, 120, 255))
+            source.putpixel((0, 0), (30, 90, 120, 0))
+            image_buffer = BytesIO()
+            source.save(image_buffer, format="PNG")
+
+            with patch("fetch_episodes.urlopen", return_value=BytesIO(image_buffer.getvalue())):
+                saved_path, status = cache_artwork_image("https://example.test/art.png", cache_path)
+
+            assert saved_path is not None
+            with Image.open(saved_path) as cached:
+                alpha_extrema = cached.getchannel("A").getextrema()
+
+        self.assertEqual(status, "downloaded")
+        self.assertEqual(alpha_extrema, (0, 255))
+
     def test_cached_channel_artwork_is_reused_without_network_access(self):
         with tempfile.TemporaryDirectory() as directory:
             cache_dir = Path(directory)
-            cached_path = cache_dir / f"{hashlib.sha256(FEED_URL.encode()).hexdigest()}.png"
+            cached_path = cache_dir / f"{hashlib.sha256(FEED_URL.encode()).hexdigest()}-v2.png"
             cached_path.write_bytes(b"cached artwork")
 
             with patch("fetch_episodes.urlopen") as urlopen_mock:
@@ -178,7 +200,7 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("\\u003c/script>", page)
         self.assertIn("Earlier poster", page)
         self.assertIn("1 previously posted", page)
-        self.assertIn('data-page-version="13"', page)
+        self.assertIn('data-page-version="16"', page)
         self.assertIn("up to 400 characters", page)
         self.assertIn("Episode tags (edit these suggestions for this episode only)", page)
         self.assertIn("Common channel tags (suggestions preloaded for episode tags)", page)
@@ -195,9 +217,11 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("/api/llm/suggest", page)
         self.assertIn("Process newest", page)
         self.assertNotIn("Process new/updated suggestions", page)
-        self.assertIn("BULK_SUGGESTION_BATCH_SIZE = 25", page)
-        self.assertIn("pending.slice(0, BULK_SUGGESTION_BATCH_SIZE)", page)
-        self.assertIn("Each run processes at most 25 newest episodes.", page)
+        self.assertIn('id="bulkSuggestionBatchSize" type="number" min="1" max="25" step="1" value="10"', page)
+        self.assertIn("MAX_BULK_SUGGESTION_BATCH_SIZE = 25", page)
+        self.assertIn("pending.slice(0, batchSize)", page)
+        self.assertIn("Choose how many of the newest eligible episodes to process per batch (up to 25).", page)
+        self.assertIn("bulkSuggestionBatchSize.addEventListener(\"input\", updateBulkSuggestionControls)", page)
         self.assertIn("Another batch will not start automatically.", page)
         self.assertIn("Stop after current", page)
         self.assertIn("suggestionIsCurrent", page)

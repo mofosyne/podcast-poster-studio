@@ -40,8 +40,13 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
 #jobOutput{max-height:190px;overflow:auto;white-space:pre-wrap;background:#0b0e0c;border:1px solid var(--line);border-radius:6px;padding:10px;font:12px/1.45 ui-monospace,monospace;color:var(--muted)}
 .history-list{display:grid;gap:8px}
 .history-row{display:grid;grid-template-columns:minmax(170px,1fr) minmax(180px,1fr) auto auto;gap:12px;align-items:center;border-top:1px solid var(--line);padding:10px 2px}
-.subscription-row{display:grid;grid-template-columns:minmax(170px,1fr) minmax(180px,2fr);gap:12px;align-items:center;border-top:1px solid var(--line);padding:10px 2px}
-.subscription-metadata,.subscription-editor{grid-column:1/-1}
+.subscription-row{display:grid;grid-template-columns:64px minmax(170px,1fr) minmax(180px,2fr);gap:12px;align-items:center;border-top:1px solid var(--line);padding:10px 2px}
+.subscription-thumbnail,.subscription-thumbnail-placeholder{width:64px;height:64px;border-radius:5px;background:var(--panel)}
+.subscription-thumbnail{object-fit:cover}
+.subscription-thumbnail-placeholder{display:grid;place-items:center;color:var(--accent);font-size:28px}
+.subscription-metadata,.subscription-editor,.subscription-actions{grid-column:1/-1}
+.subscription-actions{display:flex;gap:8px}
+.subscription-batch input{width:76px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);padding:8px;font:inherit}
 .subscription-tags{color:var(--accent);font-size:13px}
 .subscription-editor{display:grid;gap:8px;padding:10px;background:#111412;border-radius:6px}
 .subscription-editor textarea,.subscription-editor input{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px;font:inherit}
@@ -65,7 +70,7 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
 .llm-diagnostic-row{border-top:1px solid var(--line);padding:10px 2px}
 .llm-diagnostic-row strong{display:block}
 [hidden]{display:none!important}
-@media(max-width:980px){header{padding:12px 14px 0}.header-row{align-items:flex-start;flex-direction:column}.workspace{grid-template-columns:1fr}#poster,#posterPlaceholder{height:70vh;min-height:440px}.history-row{grid-template-columns:1fr auto;gap:6px}.history-meta{grid-column:1}}
+@media(max-width:980px){header{padding:12px 14px 0}.header-row{align-items:flex-start;flex-direction:column}.workspace{grid-template-columns:1fr}#poster,#posterPlaceholder{height:70vh;min-height:440px}.history-row{grid-template-columns:1fr auto;gap:6px}.history-meta{grid-column:1}.subscription-row{grid-template-columns:52px minmax(0,1fr)}.subscription-row>span{grid-column:2}}
 @media(max-width:600px){main{padding:14px 12px 32px}.panel-head{align-items:flex-start;flex-direction:column}.history-row{grid-template-columns:1fr}.history-meta{grid-column:auto}}
 </style>
 </head>
@@ -95,6 +100,7 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
   <section id="subscriptionsPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="subscriptionsTab">
     <div class="panel-head"><h2>Podcast subscriptions</h2><a id="exportSubscriptions" class="download-link" href="/api/subscriptions/download" hidden>Export OPML</a></div>
     <p class="notice" id="subscriptionsStatus">Your subscriptions are stored locally in user-data. Import a list to start or maintain them.</p>
+    <p class="notice">Cached podcast artwork is shown when available. Process subscription sends the RSS description and up to three recent episode titles/descriptions to your configured LLM, then fills the channel metadata editor. Review the suggestions and save them explicitly.</p>
     <div class="controls">
       <label class="upload" for="opmlFile">Choose OPML file</label>
       <input id="opmlFile" type="file" accept=".opml,.xml,application/xml,text/xml">
@@ -102,10 +108,17 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
       <select id="opmlImportMode"><option value="merge" selected>Merge (keep existing, add new)</option><option value="replace">Replace current list</option></select>
       <button id="reloadSubscriptions">Refresh list</button>
     </div>
+    <div class="controls subscription-batch">
+      <label for="subscriptionBatchSize">Batch size</label>
+      <input id="subscriptionBatchSize" type="number" min="1" max="25" value="10">
+      <span class="notice" id="subscriptionMissingCount">Loading channel metadata status…</span>
+      <button class="primary" id="processMissingSubscriptions" disabled>Process subscriptions</button>
+    </div>
+    <p class="notice" id="subscriptionBatchStatus" aria-live="polite">Missing channel metadata is processed in OPML order; OPML does not record when feeds were added.</p>
     <div id="subscriptionList" class="history-list" aria-live="polite"></div>
   </section>
   <section id="reviewPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="reviewTab" hidden>
-    <div class="panel-head"><h2>Review episodes and select up to eight</h2><button id="reloadCandidates">Reload list</button></div>
+    <div class="panel-head"><h2>Review episodes and select up to six</h2><button id="reloadCandidates">Reload list</button></div>
     <iframe id="candidates" title="Podcast episode candidates" src="/candidates"></iframe>
   </section>
   <section id="posterPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="posterTab" hidden>
@@ -114,6 +127,9 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
       <div class="controls">
         <label class="layout-choice" for="posterLayout">Layout
           <select id="posterLayout"><option value="list">List poster</option><option value="single">Single episode</option></select>
+        </label>
+        <label class="layout-choice" for="posterTheme">Theme
+          <select id="posterTheme"><option value="dark">Dark</option><option value="ink-saving">White (ink-saving)</option></select>
         </label>
         <a id="printPoster" class="download-link" href="/api/poster" target="_blank" rel="noopener noreferrer" title="Open the PDF in a new tab, then choose Print in your PDF viewer." hidden>Print PDF</a>
         <a id="downloadPoster" class="download-link" href="/api/poster/download" hidden>Download PDF</a>
@@ -164,6 +180,7 @@ const printPoster = document.getElementById("printPoster");
 const refreshPosterButton = document.getElementById("refreshPoster");
 const generatePosterButton = document.getElementById("generatePoster");
 const posterLayout = document.getElementById("posterLayout");
+const posterTheme = document.getElementById("posterTheme");
 const singleLayoutOption = posterLayout.querySelector('option[value="single"]');
 const previewHint = document.getElementById("previewHint");
 const selectionCount = document.getElementById("selectionCount");
@@ -176,6 +193,10 @@ const clearHistoryButton = document.getElementById("clearHistory");
 const subscriptionList = document.getElementById("subscriptionList");
 const subscriptionsStatus = document.getElementById("subscriptionsStatus");
 const exportSubscriptions = document.getElementById("exportSubscriptions");
+const subscriptionBatchSize = document.getElementById("subscriptionBatchSize");
+const subscriptionMissingCount = document.getElementById("subscriptionMissingCount");
+const processMissingSubscriptionsButton = document.getElementById("processMissingSubscriptions");
+const subscriptionBatchStatus = document.getElementById("subscriptionBatchStatus");
 const llmEnabled = document.getElementById("llmEnabled");
 const llmBaseUrl = document.getElementById("llmBaseUrl");
 const llmApiFormat = document.getElementById("llmApiFormat");
@@ -199,6 +220,10 @@ const panels = {
 };
 let selectedSlots = [];
 let hasSavedSlots = false;
+let posterSettingsInitialized = false;
+let currentSubscriptionFeeds = [];
+let processingSubscriptionBatch = false;
+const MAX_SUBSCRIPTION_BATCH_SIZE = 25;
 let activeTab = "subscriptions";
 let candidateHistorySnapshot = null;
 let candidateChannelMetadataSnapshot = null;
@@ -388,8 +413,13 @@ function updateSelection(slots){
 async function refreshStatus({reloadCandidates=false}={}){
   const data = await requestJson("/api/status");
   renderLlmSettings(data.llm);
+  if(!posterSettingsInitialized){
+    posterLayout.value = data.poster_layout || "list";
+    posterTheme.value = data.poster_theme || "dark";
+    posterSettingsInitialized = true;
+  }
   statusBox.textContent = data.opml_exists
-    ? `Subscriptions: ${data.opml_name} · Poster cadence: ${data.poster_period} · Saved layout: ${data.poster_layout} · Local data stays on this computer.`
+    ? `Subscriptions: ${data.opml_name} · Poster cadence: ${data.poster_period} · Saved layout: ${data.poster_layout} · Theme: ${data.poster_theme || "dark"} · Local data stays on this computer.`
     : "No OPML subscriptions found. Import your AntennaPod OPML file to begin.";
   hasSavedSlots = data.has_slots;
   generatePosterButton.disabled = selectedSlots.length === 0 && !hasSavedSlots;
@@ -411,9 +441,102 @@ async function refreshStatus({reloadCandidates=false}={}){
   }
 }
 
+function subscriptionNeedsMetadata(feed){
+  return !String(feed.channel_description || "").trim() || !Array.isArray(feed.tags) || feed.tags.length === 0;
+}
+
+function updateSubscriptionBatchControls(){
+  const missingCount = currentSubscriptionFeeds.filter(subscriptionNeedsMetadata).length;
+  const maximum = Math.min(MAX_SUBSCRIPTION_BATCH_SIZE, missingCount);
+  subscriptionMissingCount.textContent = missingCount
+    ? `${missingCount} subscription${missingCount === 1 ? "" : "s"} missing a channel description or default tags.`
+    : "All subscriptions have channel descriptions and default tags.";
+  subscriptionBatchSize.max = String(Math.max(1, maximum));
+  let requested = Number.parseInt(subscriptionBatchSize.value, 10);
+  if(!Number.isFinite(requested) || requested < 1) requested = Math.min(10, Math.max(1, maximum));
+  requested = Math.min(requested, Math.max(1, maximum));
+  subscriptionBatchSize.value = String(requested);
+  processMissingSubscriptionsButton.textContent = missingCount
+    ? `Process first ${Math.min(requested, missingCount)} of ${missingCount} missing`
+    : "All metadata processed";
+  processMissingSubscriptionsButton.disabled = missingCount === 0 || processingSubscriptionBatch;
+  subscriptionBatchSize.disabled = processingSubscriptionBatch || missingCount === 0;
+}
+
+async function processMissingSubscriptions(){
+  if(processingSubscriptionBatch) return;
+  const pending = currentSubscriptionFeeds.filter(subscriptionNeedsMetadata);
+  if(!pending.length){
+    updateSubscriptionBatchControls();
+    return;
+  }
+  const batchSize = Math.max(1, Math.min(
+    MAX_SUBSCRIPTION_BATCH_SIZE,
+    pending.length,
+    Number.parseInt(subscriptionBatchSize.value, 10) || 10
+  ));
+  const batch = pending.slice(0, batchSize);
+
+  try{
+    const status = await requestJson("/api/status");
+    if(!status.llm?.enabled || !status.llm.base_url || !status.llm.model){
+      statusBox.textContent = "Enable the LLM, configure its base URL, and select a model in Settings before processing channel metadata.";
+      return;
+    }
+  }catch(error){
+    statusBox.textContent = `Could not check LLM settings: ${error.message}`;
+    return;
+  }
+
+  processingSubscriptionBatch = true;
+  updateSubscriptionBatchControls();
+  let savedCount = 0;
+  const failures = [];
+  try{
+    for(let index = 0; index < batch.length; index++){
+      const feed = batch[index];
+      const progress = `${index + 1} of ${batch.length}`;
+      subscriptionBatchStatus.textContent = `Processing ${progress}: ${feed.title}…`;
+      statusBox.textContent = `Processing channel metadata ${progress}: ${feed.title}…`;
+      try{
+        const suggestion = await requestJson("/api/llm/channel-suggest", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({feed_url:feed.url})
+        });
+        await requestJson("/api/subscriptions/metadata", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            feed_url:feed.url,
+            channel_description:String(feed.channel_description || "").trim() || suggestion.channel_description,
+            tags:Array.isArray(feed.tags) && feed.tags.length ? feed.tags : suggestion.tags
+          })
+        });
+        savedCount++;
+      }catch(error){
+        failures.push(`${feed.title}: ${error.message}`);
+      }
+      subscriptionBatchStatus.textContent = `Processed ${progress}; saved ${savedCount}${failures.length ? `, failed ${failures.length}` : ""}.`;
+    }
+    await refreshSubscriptions();
+    const failureDetails = failures.length ? ` Failures: ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? "; …" : ""}` : "";
+    statusBox.textContent = `Channel metadata processing finished: saved ${savedCount} of ${batch.length}.${failureDetails}`;
+    subscriptionBatchStatus.textContent = `Finished ${batch.length} requested; saved ${savedCount}, failed ${failures.length}.`;
+  }catch(error){
+    statusBox.textContent = `Channel metadata processing stopped: ${error.message}`;
+    subscriptionBatchStatus.textContent = "Could not refresh the subscription list after processing.";
+  }finally{
+    processingSubscriptionBatch = false;
+    updateSubscriptionBatchControls();
+  }
+}
+
 async function refreshSubscriptions(){
   const data = await requestJson("/api/subscriptions");
-  syncCandidateChannelMetadata(data.feeds);
+  currentSubscriptionFeeds = Array.isArray(data.feeds) ? data.feeds : [];
+  updateSubscriptionBatchControls();
+  syncCandidateChannelMetadata(currentSubscriptionFeeds);
   subscriptionList.replaceChildren();
   exportSubscriptions.hidden = !data.exists;
   subscriptionsStatus.textContent = data.exists
@@ -429,12 +552,23 @@ async function refreshSubscriptions(){
   for(const feed of data.feeds){
     const row = document.createElement("div");
     row.className = "subscription-row";
+    const thumbnail = document.createElement(feed.artwork_url ? "img" : "div");
+    thumbnail.className = feed.artwork_url ? "subscription-thumbnail" : "subscription-thumbnail-placeholder";
+    if(feed.artwork_url){
+      thumbnail.src = feed.artwork_url;
+      thumbnail.alt = `Podcast artwork for ${feed.title}`;
+      thumbnail.loading = "lazy";
+      thumbnail.decoding = "async";
+    }else{
+      thumbnail.setAttribute("aria-hidden", "true");
+      thumbnail.textContent = "♫";
+    }
     const title = document.createElement("strong");
     title.textContent = feed.groups.length ? `${feed.groups.join(" / ")} · ${feed.title}` : feed.title;
     const url = document.createElement("span");
     url.className = "notice";
     url.textContent = feed.url;
-    row.append(title, url);
+    row.append(thumbnail, title, url);
     const metadata = document.createElement("div");
     metadata.className = "subscription-metadata";
     metadata.textContent = feed.channel_description || "No channel description / editorial note yet.";
@@ -464,6 +598,27 @@ async function refreshSubscriptions(){
     tagsInput.placeholder = "Environment, Greens affiliated";
     tagsInput.value = feed.tags.join(", ");
     tagsLabel.append(tagsInput);
+    const subscriptionActions = document.createElement("div");
+    subscriptionActions.className = "subscription-actions";
+    const suggestMetadata = document.createElement("button");
+    suggestMetadata.textContent = "Process subscription";
+    suggestMetadata.title = "Use the configured LLM to suggest this channel's description and default tags";
+    suggestMetadata.addEventListener("click", async () => {
+      editor.open = true;
+      suggestMetadata.disabled = true;
+      statusBox.textContent = `Generating channel metadata suggestions for ${feed.title}…`;
+      try{
+        const suggestion = await requestJson("/api/llm/channel-suggest", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({feed_url:feed.url})
+        });
+        description.value = suggestion.channel_description;
+        tagsInput.value = suggestion.tags.join(", ");
+        statusBox.textContent = `Suggested channel description and tags for ${feed.title}. Review them, then save if they look right.`;
+      }catch(error){ statusBox.textContent = `Could not suggest channel metadata: ${error.message}`; }
+      finally{ suggestMetadata.disabled = false; }
+    });
     const saveMetadata = document.createElement("button");
     saveMetadata.className = "primary";
     saveMetadata.textContent = "Save channel metadata";
@@ -485,7 +640,8 @@ async function refreshSubscriptions(){
       finally{ saveMetadata.disabled = false; }
     });
     editor.append(editorSummary, descriptionLabel, tagsLabel, saveMetadata);
-    row.append(editor);
+    subscriptionActions.append(suggestMetadata);
+    row.append(subscriptionActions, editor);
     subscriptionList.append(row);
   }
 }
@@ -574,7 +730,7 @@ async function refreshPreview(){
       await requestJson("/api/preview", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({slots:selectedSlots, layout:posterLayout.value})
+        body:JSON.stringify({slots:selectedSlots, layout:posterLayout.value, theme:posterTheme.value})
       });
       await refreshStatus();
       statusBox.textContent = "Preview refreshed from your current selection. It has not been added to history.";
@@ -649,13 +805,16 @@ scanButton.addEventListener("click", async () => {
 
 generatePosterButton.addEventListener("click", () => {
   if(selectedSlots.length){
-    runGeneration("/api/generate", {slots:selectedSlots, layout:posterLayout.value});
+    runGeneration("/api/generate", {slots:selectedSlots, layout:posterLayout.value, theme:posterTheme.value});
   } else {
-    runGeneration("/api/generate-current", {});
+    runGeneration("/api/generate-current", {layout:posterLayout.value, theme:posterTheme.value});
   }
 });
 refreshPosterButton.addEventListener("click", refreshPreview);
 posterLayout.addEventListener("change", () => {
+  if(activeTab === "poster") refreshPreview();
+});
+posterTheme.addEventListener("change", () => {
   if(activeTab === "poster") refreshPreview();
 });
 document.getElementById("reloadCandidates").addEventListener("click", () => {
@@ -679,6 +838,8 @@ clearHistoryButton.addEventListener("click", async () => {
 document.getElementById("reloadSubscriptions").addEventListener("click", () => {
   refreshSubscriptions().catch(error => { statusBox.textContent = error.message; });
 });
+subscriptionBatchSize.addEventListener("input", updateSubscriptionBatchControls);
+processMissingSubscriptionsButton.addEventListener("click", processMissingSubscriptions);
 document.getElementById("refreshLlmDiagnostics").addEventListener("click", refreshLlmDiagnostics);
 llmDiagnostics.addEventListener("toggle", () => {
   if(llmDiagnostics.open) refreshLlmDiagnostics();
