@@ -6,5 +6,9 @@
   "output_pdf": "user-data/podcast-poster.pdf",
   "poster_title": "EPISODES WORTH LISTENING TO THIS {period}",
   "poster_period": "month",
+  "poster_layout": "list",
+  "single_poster_title": "ONE EPISODE WORTH YOUR TIME",
+  "subscription_metadata": {},
+  "llm": {"enabled": false},
   "slots": []
 }

@@ -30,7 +30,7 @@ Copy your AntennaPod OPML export to `user-data/subscriptions.opml`. The example 
 
 ## Keep personal data local
 
-Everything under `user-data/` is ignored by Git. It is intended for personal and generated files, including your OPML subscriptions, real config and selected slots, downloaded feed/artwork cache, candidate review page, generated PDFs, and poster history. The history is used to flag episodes that appeared on earlier posters.
+Everything under `user-data/` is ignored by Git. It is intended for personal and generated files, including your OPML subscriptions, real config and selected slots, downloaded feed/artwork cache, candidate review page, generated PDFs, poster history, and saved LLM drafts (`llm-suggestions.json`). The history is used to flag episodes that appeared on earlier posters; saved LLM drafts mark processed episodes and are versioned so newer suggestion rules can make old drafts eligible for reprocessing.
 
 Keep reusable code, tests, and `config.example.json` in the repository; do not add your personal config, subscriptions, cache, history, or generated posters to a shared repository. The example config contains no selected episodes. Poster generation needs at least one slot in your local config.
 
@@ -44,10 +44,25 @@ Run `just` to list recipes:
 - `just episodes` scans the full OPML feed history and builds the chronological review page. Extra script arguments can be forwarded, for example `just episodes -- --opml /path/to/feeds.opml`.
 - `just resolve` resolves configured slot show names against the OPML and writes `user-data/resolved_feeds.json`.
 - `just poster` generates the poster PDF and archives its snapshot.
+- `just web` starts the local browser-based workflow.
 - `just test` runs the unit test suite.
 - `just check` checks Python syntax and local config JSON.
 
 The commands can also be run with `.venv/bin/python` directly, for example `.venv/bin/python fetch_episodes.py`.
+
+## Use the integrated web workflow
+
+Start the local server with:
+
+```sh
+just web
+```
+
+Open `http://127.0.0.1:8765/`. The app starts on **0 · Subscriptions**, where you can inspect the current feed list, export it as OPML, or import another OPML file. Import defaults to **Merge**, which keeps current feeds and adds new URLs without duplicates; choose **Replace** to swap the list (the app asks for confirmation). Then scan subscriptions and continue through **Review episodes**, **Edit selection**, **Poster**, and **History**. Check episodes in Review episodes; Edit selection becomes available for editing poster summaries. Opening **Poster** automatically previews the current selection, and changing the layout refreshes it too; **Refresh preview** remains available as a manual retry. Previewing does not add a history entry. Use **Generate & archive** when you are ready to keep that poster in history. Poster and history views include **Print PDF** links that open the browser's PDF viewer, plus direct PDF downloads. Mark each item printed after printing or publishing it. Unprinted entries can be deleted normally; printed or older entries have an explicit **Force delete** action. **Clear poster archive** removes archived poster records and PDFs (printed and unprinted) while keeping subscriptions, episode data, caches, and the current poster PDF. Deleting history also removes its episode warnings. The server binds only to loopback and is intended for local use. Stop it with Ctrl-C.
+
+**5 · Settings** shows whether common LLM environment variables are present. The app checks `LLM_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, or `OLLAMA_HOST`, plus optional model (`LLM_MODEL`, `OPENAI_MODEL`, `OLLAMA_MODEL`) and key (`LLM_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) variables. It only reports key-variable presence; secret values are never shown or saved. LLM connections are disabled by default, and startup does not probe ports or contact a model. If no endpoint is detected, Settings pre-fills `http://127.0.0.1:8080/v1` as an unverified suggestion; edit it if your service uses another address. Enable the connection to opt in; **Test connection** then requests only the service's model list. Choose a model ID from that list for suggestions. OpenAI-compatible and Ollama APIs are supported. The configured endpoint may be remote; only use a service you trust.
+
+In **Review episodes**, **Process newest X of Y** generates drafts for up to 25 unprocessed or older-version episodes. Each run asks for confirmation, processes one episode at a time, saves drafts under `user-data/llm-suggestions.json`, and marks each completed episode; **Stop after current** ends the batch safely. Another batch starts only when you click again. Each processed row shows an inline AI summary snippet; expand it to read the full summary and tags. Existing drafts are preloaded into **Edit selection**, where you can revise them or regenerate one episode. Scans never make LLM requests. Bump `LLM_SUGGESTION_VERSION` in `server.py` when changing suggestion prompts or output rules; old-version drafts then become eligible for bulk reprocessing.
 
 ## Review all available episodes
 
@@ -57,7 +72,13 @@ Run:
 just episodes
 ```
 
-The script scans feeds in the OPML and creates `user-data/episode-candidates.html`, sorted newest-first across the full episode history each feed provides. Results are paged 200 at a time. Feed responses are cached under `user-data/cache/feeds/`; if a feed is temporarily unavailable, its cached response is used when possible. The page compares episodes with `user-data/history/posters/` and labels episodes that appeared on an earlier poster. You can still select one intentionally; the page warns before export. Filter by show or title, select up to eight episodes, and export slot entries to add to the `slots` array in `user-data/config.json`.
+The scanner fetches feeds from the configured OPML and creates `user-data/episode-candidates.html`, sorted newest-first across the full episode history each feed provides. Results are paged 200 at a time. In the web workflow, **Process newest X of Y** drafts summaries and tags for up to 25 unprocessed or old-version episodes per click; completed drafts are visibly marked, previewable inline, and reused in Edit selection. Feed responses are cached under `user-data/cache/feeds/`; if a feed is temporarily unavailable, its cached response is used when possible. Channel artwork is downloaded once per show, resized, and cached under `user-data/cache/artwork/`. For the three newest episodes of each show, the scanner also downloads episode-specific artwork when the feed provides it; that image is preferred, with channel art as the fallback. Older episodes reuse channel art. Images are cached by source, and the review page lazy-loads visible thumbnails. Feed descriptions appear in expandable, plain-text summaries capped at 400 characters. Episode durations are shown when feeds provide them. Missing or unavailable artwork gets a simple placeholder. The page compares episodes with `user-data/history/posters/` and labels episodes that appeared on an earlier poster. You can still select one intentionally; the page warns before export. Filter by show or title and select up to eight episodes. In the web app, the selection count updates in the top tabs; choose **Edit selection** to edit optional poster summaries (up to 400 characters) and episode tags. Opening **Poster** automatically refreshes the current selection; **Refresh preview** is available as a manual retry. Choose List or, for exactly one episode, Single episode in the layout selector. **Generate & archive** saves the finished poster to history. When using the standalone HTML file, the review step downloads fixed slots that you can add to `user-data/config.json`.
+
+## Subscription notes and tags
+
+On **0 · Subscriptions**, expand **Edit channel description and tags** on a feed to save a local editorial note (up to 400 characters) and default tags. For example, a channel note can say “Greens-affiliated podcast” and its default tag can be `Environment`. These annotations are stored in `user-data/config.json` under `subscription_metadata`, keyed by feed URL; they do not modify your OPML. Native channel descriptions from the RSS feed remain available as a fallback when no custom note is saved.
+
+Episodes inherit their subscription's default tags in the candidate list and in **Edit selection**. The channel details box lets you adjust the channel note and common tag suggestions for this selection; changing common tags preloads each selected episode's tag field unless that episode has already been individually overridden. Change an episode's tags when its topic differs; clearing that input removes inherited tags for that episode. Tags are comma-separated, deduplicated case-insensitively, and limited to 12 labels of 40 characters each. Poster tags print as hashtags; channel notes are review metadata and are not printed.
 
 ## Configure poster slots
 
@@ -70,7 +91,8 @@ The script scans feeds in the OPML and creates `user-data/episode-candidates.htm
   "episode": "A selected older episode",
   "date": "October 12, 2024",
   "url": "https://example.com/episode",
-  "feed_url": "https://example.com/feed.xml"
+  "feed_url": "https://example.com/feed.xml",
+  "summary": "An optional short, edited blurb to print on the poster."
 }
 ```
 
@@ -84,7 +106,7 @@ or dynamic, resolving to the newest dated episode in its feed each time the post
 }
 ```
 
-The poster supports up to eight slots. Feed URLs are used for dynamic lookup and artwork; artwork is cached under `user-data/cache/artwork/`, with title-colored placeholder artwork used when no channel art is available.
+The list poster supports up to eight slots. Set `poster_layout` to `"list"` or `"single"` in `user-data/config.json`; the single layout requires exactly one slot and uses `single_poster_title`. The browser workflow sets this automatically when you choose a generation action. If a fixed slot includes a `summary`, it is printed as a short excerpt on the poster. A slot's `tags` override the subscription defaults; omit `tags` in manually configured slots to inherit defaults, or use an empty list to explicitly clear them. Dynamic latest slots also inherit subscription notes and tags. Feed URLs are used for dynamic lookup and artwork; artwork is cached under `user-data/cache/artwork/`, with title-colored placeholder artwork used when no episode or channel art is available.
 
 ## Generate and retain posters
 

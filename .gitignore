@@ -1,4 +1,25 @@
+# Local subscriptions, settings, caches, and generated posters
+user-data/
+*.opml
+*.pdf
+*.log
+
+# Local credentials and secrets
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
 .venv/
+venv/
 __pycache__/
 *.py[cod]
-user-data/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db

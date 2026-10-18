@@ -1,7 +1,9 @@
+import argparse
 import colorsys
 import datetime
 import hashlib
 import json
+import os
 import shutil
 import sys
 import xml.etree.ElementTree as ET
@@ -23,9 +25,14 @@ from reportlab.pdfgen import canvas
 from fetch_episodes import scan_feed
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "user-data" / "config.json"
+CONFIG_PATH = Path(os.environ.get("PODCAST_POSTER_CONFIG", BASE_DIR / "user-data" / "config.json"))
 MAX_DOWNLOAD_BYTES = 15 * 1024 * 1024
 USER_AGENT = "PodcastPoster/1.0 (local poster generator)"
+
+argument_parser = argparse.ArgumentParser(description="Generate a podcast poster PDF.")
+argument_parser.add_argument("--preview", action="store_true", help="Write the preview PDF without archiving it.")
+arguments = argument_parser.parse_args()
+preview_only = arguments.preview
 
 if not CONFIG_PATH.is_file():
     raise SystemExit("User config not found; run `just setup` to create user-data/config.json.")
@@ -38,6 +45,12 @@ if not slots:
 if len(slots) > 8:
     raise SystemExit("user-data/config.json supports at most eight poster slots")
 
+poster_layout = config.get("poster_layout", "list")
+if poster_layout not in {"list", "single"}:
+    raise SystemExit('user-data/config.json "poster_layout" must be "list" or "single"')
+if poster_layout == "single" and len(slots) != 1:
+    raise SystemExit('A "single" poster layout requires exactly one configured slot')
+
 poster_period = config.get("poster_period", "month").lower()
 if poster_period not in {"month", "week"}:
     raise SystemExit('user-data/config.json "poster_period" must be "month" or "week"')
@@ -49,12 +62,33 @@ else:
     week_start = now - datetime.timedelta(days=now.weekday())
     edition_label = f"WEEK OF {week_start.strftime('%B')} {week_start.day}, {week_start.year}".upper()
 
-poster_title = config["poster_title"].format(period=poster_period.upper())
+poster_title = (
+    config.get("single_poster_title", "ONE EPISODE WORTH YOUR TIME")
+    if poster_layout == "single"
+    else config["poster_title"].format(period=poster_period.upper())
+)
 
 
 def project_path(config_key):
     path = Path(config[config_key])
     return path if path.is_absolute() else BASE_DIR / path
+
+
+def apply_subscription_metadata(item, feed_url, slot):
+    metadata = config.get("subscription_metadata", {})
+    if not isinstance(metadata, dict):
+        return item
+    subscription = metadata.get(feed_url, {})
+    if not isinstance(subscription, dict):
+        return item
+
+    result = dict(item)
+    channel_description = subscription.get("channel_description")
+    if "channel_description" not in slot and isinstance(channel_description, str) and channel_description.strip():
+        result["channel_description"] = channel_description.strip()
+    if "tags" not in slot and isinstance(subscription.get("tags"), list):
+        result["tags"] = subscription["tags"]
+    return result
 
 
 def resolve_slots():
@@ -72,7 +106,8 @@ def resolve_slots():
             missing = [key for key in ("episode", "date", "url") if not slot.get(key)]
             if missing:
                 raise ValueError(f"Fixed slot for {show} is missing: {', '.join(missing)}")
-            resolved.append({**slot, "slot_type": slot_type})
+            fixed = apply_subscription_metadata({**slot, "slot_type": slot_type}, slot.get("feed_url"), slot)
+            resolved.append(fixed)
         elif slot_type == "latest":
             feed_url = slot.get("feed_url")
             if not feed_url:
@@ -83,7 +118,7 @@ def resolve_slots():
             if not episodes:
                 raise RuntimeError(f"Could not resolve latest episode for {show} ({status})")
             latest = max(episodes, key=lambda episode: episode["published_at"])
-            resolved.append({**latest, "slot_type": slot_type})
+            resolved.append(apply_subscription_metadata({**latest, "slot_type": slot_type}, feed_url, slot))
         else:
             raise ValueError(f"Unknown slot type for {show}: {slot_type!r}")
 
@@ -106,7 +141,9 @@ def archive_generation(pdf_path, items):
     shutil.copy2(pdf_path, archive_pdf)
     snapshot = {
         "generated_at": generated_at.isoformat(),
+        "printed_at": None,
         "title": poster_title,
+        "layout": poster_layout,
         "period": poster_period,
         "edition": edition_label,
         "pdf": archive_pdf.name,
@@ -177,6 +214,15 @@ def artwork_url_from_page(page_url):
 
 
 def artwork_for(item):
+    cached_artwork = item.get("artwork_path")
+    if isinstance(cached_artwork, str) and cached_artwork.strip():
+        candidate = Path(cached_artwork)
+        if not candidate.is_absolute():
+            candidate = (BASE_DIR / candidate).resolve()
+        artwork_root = (project_path("feed_cache_dir") / "artwork").resolve()
+        if candidate.is_relative_to(artwork_root) and candidate.is_file():
+            return candidate
+
     feed_url = item.get("feed_url")
     page_url = item.get("url")
     if not feed_url and not page_url:
@@ -207,7 +253,10 @@ def artwork_for(item):
             raise ValueError("artwork image is larger than 15 MB")
 
         with Image.open(BytesIO(image_data)) as source:
-            artwork = ImageOps.fit(source.convert("RGB"), (512, 512))
+            rgba = source.convert("RGBA")
+            background = Image.new("RGB", rgba.size, "#111412")
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            artwork = ImageOps.fit(background, (512, 512))
         cache_dir.mkdir(parents=True, exist_ok=True)
         artwork.save(cache_path, format="PNG", optimize=True)
         print(f"Artwork cached for {item['show']}")
@@ -283,6 +332,120 @@ def draw_placeholder_artwork(pdf, x, y, size, show):
     pdf.restoreState()
 
 
+def fit_pdf_text(pdf, text, font_name, font_size, max_width):
+    text = text.strip()
+    if pdf.stringWidth(text, font_name, font_size) <= max_width:
+        return text
+    suffix = "…"
+    while text and pdf.stringWidth(text + suffix, font_name, font_size) > max_width:
+        previous_word = text.rfind(" ")
+        text = text[:previous_word].rstrip() if previous_word >= 0 else text[:-1]
+    return text.rstrip() + suffix
+
+
+def draw_single_poster(pdf, item):
+    margin = 18 * mm
+    title = poster_title
+    title_size = 28
+    while pdf.stringWidth(title, "Helvetica-Bold", title_size) > W - 2 * margin:
+        title_size -= 0.5
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", title_size)
+    pdf.drawCentredString(W / 2, H - margin - 10 * mm, title)
+    pdf.setFillColor(colors.HexColor("#4fd1c5"))
+    pdf.setFont("Helvetica-Bold", 11)
+    show_name = fit_pdf_text(pdf, item["show"], "Helvetica-Bold", 11, W - 2 * margin)
+    pdf.drawCentredString(W / 2, H - margin - 19 * mm, show_name)
+    tags = ["#" + "_".join(str(tag).split()) for tag in item.get("tags", []) if str(tag).strip()]
+    if tags:
+        pdf.setFillColor(colors.HexColor("#9ba79f"))
+        pdf.setFont("Helvetica", 8)
+        pdf.drawCentredString(W / 2, H - margin - 25 * mm, fit_pdf_text(pdf, " ".join(tags), "Helvetica", 8, W - 2 * margin))
+
+    artwork_size = 96 * mm
+    artwork_x = (W - artwork_size) / 2
+    artwork_y = H - margin - 31 * mm - artwork_size
+    artwork_path = artwork_for(item)
+    if artwork_path:
+        pdf.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size)
+    else:
+        draw_placeholder_artwork(pdf, artwork_x, artwork_y, artwork_size, item["show"])
+
+    content_width = W - 2 * margin
+    title_lines = wrap_pdf_text(pdf, item["episode"], "Helvetica-Bold", 20, content_width, 3)
+    title_y = artwork_y - 12 * mm
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", 20)
+    for line in title_lines:
+        pdf.drawCentredString(W / 2, title_y, line)
+        title_y -= 8 * mm
+
+    summary = str(item.get("summary") or "").strip()
+    if summary:
+        summary_lines = wrap_pdf_text(pdf, summary, "Helvetica", 10, content_width - 14 * mm, 8)
+        pdf.setFillColor(colors.HexColor("#c4ceca"))
+        pdf.setFont("Helvetica", 10)
+        summary_y = title_y - 2 * mm
+        for line in summary_lines:
+            pdf.drawCentredString(W / 2, summary_y, line)
+            summary_y -= 4.5 * mm
+        detail_y = summary_y - 3 * mm
+    else:
+        detail_y = title_y - 3 * mm
+
+    episode_date = item.get("date", "")
+    if episode_date:
+        pdf.setFillColor(colors.HexColor("#999999"))
+        pdf.setFont("Helvetica", 10)
+        pdf.drawCentredString(W / 2, detail_y, episode_date)
+
+    qr_size = 30 * mm
+    qr_image = qrcode.make(item["url"], border=4)
+    qr_buffer = BytesIO()
+    qr_image.save(qr_buffer, kind="PNG")
+    qr_buffer.seek(0)
+    qr_x = W - margin - qr_size
+    qr_y = margin + 7 * mm
+    pdf.drawImage(ImageReader(qr_buffer), qr_x, qr_y, width=qr_size, height=qr_size)
+
+    url_font_size = 8
+    url_width = min(pdf.stringWidth(item["url"], "Helvetica", url_font_size), W - 2 * margin - qr_size - 8 * mm)
+    while pdf.stringWidth(item["url"], "Helvetica", url_font_size) > W - 2 * margin - qr_size - 8 * mm and url_font_size > 6:
+        url_font_size -= 0.25
+    url_y = qr_y + qr_size / 2
+    pdf.setFillColor(colors.HexColor("#4fd1c5"))
+    pdf.setFont("Helvetica", url_font_size)
+    pdf.drawString(margin, url_y, fit_pdf_text(pdf, item["url"], "Helvetica", url_font_size, W - 2 * margin - qr_size - 8 * mm))
+    pdf.linkURL(item["url"], (margin, url_y - 0.6 * mm, margin + url_width, url_y + 2.4 * mm), relative=0, thickness=0)
+
+
+def wrap_pdf_text(pdf, text, font_name, font_size, max_width, max_lines):
+    words = text.split()
+    lines = []
+    line = ""
+    truncated = False
+    for word in words:
+        candidate = (line + " " + word).strip()
+        if pdf.stringWidth(candidate, font_name, font_size) <= max_width:
+            line = candidate
+        elif line:
+            lines.append(line)
+            line = word
+            if len(lines) == max_lines:
+                truncated = True
+                break
+        else:
+            lines.append(fit_pdf_text(pdf, word, font_name, font_size, max_width))
+            if len(lines) == max_lines:
+                truncated = True
+                break
+    if line and len(lines) < max_lines:
+        lines.append(line)
+    if truncated and lines:
+        lines[-1] = fit_pdf_text(pdf, lines[-1] + "…", font_name, font_size, max_width)
+    return lines
+
+
 data = resolve_slots()
 
 output_pdf = project_path("output_pdf")
@@ -295,24 +458,27 @@ margin = 18 * mm
 c.setFillColor(colors.HexColor("#1a1a1a"))
 c.rect(0, 0, W, H, fill=1, stroke=0)
 
-c.setFillColor(colors.white)
-title_font_size = 30
-while c.stringWidth(poster_title, "Helvetica-Bold", title_font_size) > W - 2 * margin:
-    title_font_size -= 0.5
-c.setFont("Helvetica-Bold", title_font_size)
-c.drawCentredString(W / 2, H - margin - 10 * mm, poster_title)
-c.setFont("Helvetica", 12)
-c.setFillColor(colors.HexColor("#aaaaaa"))
-c.drawCentredString(W / 2, H - margin - 18 * mm, "A curated selection of episodes - scan to listen")
+if poster_layout == "list":
+    c.setFillColor(colors.white)
+    title_font_size = 30
+    while c.stringWidth(poster_title, "Helvetica-Bold", title_font_size) > W - 2 * margin:
+        title_font_size -= 0.5
+    c.setFont("Helvetica-Bold", title_font_size)
+    c.drawCentredString(W / 2, H - margin - 10 * mm, poster_title)
+    c.setFont("Helvetica", 12)
+    c.setFillColor(colors.HexColor("#aaaaaa"))
+    c.drawCentredString(W / 2, H - margin - 18 * mm, "A curated selection of episodes - scan to listen")
 
 row_h = (H - margin * 2 - 28 * mm) / len(data)
 top = H - margin - 28 * mm
 
-for i, item in enumerate(data):
+for i, item in enumerate(data if poster_layout == "list" else []):
     y_top = top - i * row_h
     y_center = y_top - row_h / 2
+    text_rise = min(10 * mm, max(0, (row_h - 35 * mm) * 0.12))
+    text_center = y_center + text_rise
     artwork_path = artwork_for(item)
-    artwork_size = row_h * 0.76
+    artwork_size = min(row_h * 0.76, 56 * mm)
     artwork_x = margin
     artwork_y = y_center - artwork_size / 2
 
@@ -321,59 +487,83 @@ for i, item in enumerate(data):
     else:
         draw_placeholder_artwork(c, artwork_x, artwork_y, artwork_size, item["show"])
 
-    qr_size = row_h * 0.4
+    qr_size = min(row_h * 0.4, 24 * mm)
     qr_img = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
     qr_img.save(qr_buffer, kind="PNG")
     qr_buffer.seek(0)
 
     qr_x = W - margin - qr_size
-    qr_y = y_center - qr_size / 2
+    qr_drop = min(22 * mm, max(0, (row_h - 30 * mm) * 0.22))
+    qr_y = y_center - qr_size / 2 - qr_drop
     c.drawImage(ImageReader(qr_buffer), qr_x, qr_y, width=qr_size, height=qr_size)
 
     text_x = artwork_x + artwork_size + 7 * mm
     text_w = qr_x - 7 * mm - text_x
 
+    tags = ["#" + "_".join(str(tag).split()) for tag in item.get("tags", []) if str(tag).strip()]
+    tag_label = fit_pdf_text(c, " ".join(tags), "Helvetica", 8, text_w * 0.42) if tags else ""
+    tag_width = c.stringWidth(tag_label, "Helvetica", 8) if tag_label else 0
+    show_width = max(text_w - tag_width - 3 * mm, text_w * 0.5)
     c.setFillColor(colors.HexColor("#4fd1c5"))
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(text_x, y_center + 8 * mm, item["show"])
+    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", 16, show_width)
+    c.drawString(text_x, text_center + 8 * mm, show_name)
+    if tag_label:
+        c.setFillColor(colors.HexColor("#9ba79f"))
+        c.setFont("Helvetica", 8)
+        c.drawRightString(text_x + text_w, text_center + 8 * mm, tag_label)
 
     c.setFillColor(colors.white)
-    c.setFont("Helvetica", 12)
-    words = item["episode"].split()
-    lines = []
-    line = ""
-    for word in words:
-        test = (line + " " + word).strip()
-        if c.stringWidth(test, "Helvetica", 12) > text_w:
-            lines.append(line)
-            line = word
-        else:
-            line = test
-    if line:
-        lines.append(line)
-    line_y = y_center
-    for line in lines[:2]:
-        c.drawString(text_x, line_y, line)
-        line_y -= 5.5 * mm
+    summary = str(item.get("summary") or "").strip()
+    if summary:
+        title_font_size = 11
+        c.setFont("Helvetica", title_font_size)
+        title = fit_pdf_text(c, item["episode"], "Helvetica", title_font_size, text_w)
+        c.drawString(text_x, text_center + 2.5 * mm, title)
 
-    date_y = line_y - 2 * mm
+        summary_font_size = 7.5
+        c.setFont("Helvetica", summary_font_size)
+        c.setFillColor(colors.HexColor("#c4ceca"))
+        summary_y = text_center - 1.5 * mm
+        row_bottom = y_top - row_h
+        summary_leading = 3.2 * mm
+        available_lines = int((summary_y - (row_bottom + 10 * mm)) / summary_leading) + 1
+        max_summary_lines = max(1, min(12, available_lines))
+        summary_lines = wrap_pdf_text(
+            c, summary, "Helvetica", summary_font_size, text_w, max_summary_lines
+        )
+        for summary_line in summary_lines:
+            c.drawString(text_x, summary_y, summary_line)
+            summary_y -= summary_leading
+        date_y = summary_y - 1.5 * mm
+    else:
+        c.setFont("Helvetica", 12)
+        lines = wrap_pdf_text(c, item["episode"], "Helvetica", 12, text_w, 2)
+        line_y = text_center
+        for line in lines:
+            c.drawString(text_x, line_y, line)
+            line_y -= 5.5 * mm
+        date_y = line_y - 2 * mm
     c.setFillColor(colors.HexColor("#888888"))
     c.setFont("Helvetica-Oblique", 10)
     c.drawString(text_x, date_y, item["date"])
 
+    use_full_width_url = row_h >= 55 * mm
+    url_x = margin if use_full_width_url else text_x
+    url_max_width = W - 2 * margin if use_full_width_url else text_w
     url_font_size = 8
-    url_width = c.stringWidth(item["url"], "Helvetica", url_font_size)
-    while url_width > text_w and url_font_size > 6.5:
+    while c.stringWidth(item["url"], "Helvetica", url_font_size) > url_max_width and url_font_size > 6.5:
         url_font_size -= 0.25
-        url_width = c.stringWidth(item["url"], "Helvetica", url_font_size)
-    url_y = date_y - 3.5 * mm
+    visible_url = fit_pdf_text(c, item["url"], "Helvetica", url_font_size, url_max_width)
+    url_width = c.stringWidth(visible_url, "Helvetica", url_font_size)
+    url_y = y_top - row_h + 4 * mm if use_full_width_url else date_y - 3.5 * mm
     c.setFillColor(colors.HexColor("#4fd1c5"))
     c.setFont("Helvetica", url_font_size)
-    c.drawString(text_x, url_y, item["url"])
+    c.drawString(url_x, url_y, visible_url)
     c.linkURL(
         item["url"],
-        (text_x, url_y - 0.6 * mm, text_x + min(url_width, text_w), url_y + 2.4 * mm),
+        (url_x, url_y - 0.6 * mm, url_x + url_width, url_y + 2.4 * mm),
         relative=0,
         thickness=0,
     )
@@ -382,11 +572,17 @@ for i, item in enumerate(data):
         c.setStrokeColor(colors.HexColor("#333333"))
         c.line(margin, y_top - row_h, W - margin, y_top - row_h)
 
+if poster_layout == "single":
+    draw_single_poster(c, data[0])
+
 c.setFillColor(colors.HexColor("#666666"))
 c.setFont("Helvetica", 9)
 c.drawCentredString(W / 2, margin / 2, edition_label)
 
 c.save()
-archive_pdf, archive_json = archive_generation(output_pdf, data)
 print(f"Wrote {output_pdf}")
-print(f"Archived {archive_pdf} and {archive_json}")
+if preview_only:
+    print("Preview only; not added to poster history.")
+else:
+    archive_pdf, archive_json = archive_generation(output_pdf, data)
+    print(f"Archived {archive_pdf} and {archive_json}")
