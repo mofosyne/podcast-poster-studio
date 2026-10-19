@@ -200,7 +200,7 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("\\u003c/script>", page)
         self.assertIn("Earlier poster", page)
         self.assertIn("1 previously posted", page)
-        self.assertIn('data-page-version="16"', page)
+        self.assertIn('data-page-version="17"', page)
         self.assertIn("up to 400 characters", page)
         self.assertIn("Episode tags (edit these suggestions for this episode only)", page)
         self.assertIn("Common channel tags (suggestions preloaded for episode tags)", page)

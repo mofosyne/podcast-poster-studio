@@ -529,7 +529,7 @@ async function processMissingSubscriptions(){
       }catch(error){
         failures.push(`${feed.title}: ${error.message}`);
       }
-      subscriptionBatchStatus.textContent = `Processed ${progress}; saved ${savedCount}${failures.length ? `, failed ${failures.length}` : ""}.`;
+      subscriptionBatchStatus.textContent = `Processed ${progress}; saved ${savedCount}${failures.length ? `, failed ${failures.length}` : ""}.${stopSubscriptionBatchRequested ? " Stopping…" : ""}`;
     }
     await refreshSubscriptions();
     const failureDetails = failures.length ? ` Failures: ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? "; …" : ""}` : "";
