@@ -123,13 +123,13 @@ a:hover{color:var(--accent);text-decoration:underline}
 @media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date{grid-column:3}.controls{flex-wrap:wrap}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
 </style>
 </head>
-<body data-page-version="16">
+<body data-page-version="17">
 <main>
   <h1>Podcast episode archive</h1>
   <p class="subtitle">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
   <div class="status">__EPISODE_COUNT__ episodes from __FEED_COUNT__ feeds · __POSTED_COUNT__ previously posted · generated __GENERATED__ · __CACHE_STATUS__</div>
-  <div class="controls" id="controls"><input id="search" type="search" placeholder="Filter by show or episode title"><button id="clear">Clear selection</button><label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" max="25" step="1" value="10"></label><button id="suggestUnprocessed" type="button" hidden>Process newest 10</button><button id="stopBulkSuggestions" type="button" hidden>Stop after current</button></div>
-  <div id="bulkSuggestionStatus" class="bulk-suggestion-status" aria-live="polite">Choose how many of the newest eligible episodes to process per batch (up to 25). Another batch starts only when you choose it.</div>
+  <div class="controls" id="controls"><input id="search" type="search" placeholder="Filter by show or episode title"><button id="clear">Clear selection</button><label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" step="1" value="10"></label><button id="suggestUnprocessed" type="button" hidden>Process newest 10</button><button id="stopBulkSuggestions" type="button" hidden>Stop after current</button></div>
+  <div id="bulkSuggestionStatus" class="bulk-suggestion-status" aria-live="polite">Choose how many of the newest eligible episodes to process per batch. Another batch starts only when you choose it.</div>
   <div id="list"></div>
   <div class="paging" id="paging"><button id="previousPage" type="button">Previous</button><span id="pageStatus"></span><button id="nextPage" type="button">Next</button></div>
   <section id="selectionReview" hidden>
@@ -159,7 +159,7 @@ const previousPage = document.getElementById("previousPage");
 const nextPage = document.getElementById("nextPage");
 const PAGE_SIZE = 200;
 const MAX_POSTER_SELECTION = 6;
-const MAX_BULK_SUGGESTION_BATCH_SIZE = 25;
+
 let currentPage = 0;
 const selection = new Set();
 const selectionLabel = document.getElementById("selection");
@@ -237,7 +237,7 @@ function updateBulkSuggestionControls(){
   stopBulkSuggestionsButton.hidden = !bulkSuggestionsRunning;
   stopBulkSuggestionsButton.disabled = stopBulkSuggestionsRequested;
   const pending = EPISODES.filter(episode => !suggestionIsCurrent(episode)).length;
-  const maximum = Math.min(MAX_BULK_SUGGESTION_BATCH_SIZE, pending);
+  const maximum = pending;
   let requested = Number.parseInt(bulkSuggestionBatchSize.value, 10);
   if(!Number.isFinite(requested) || requested < 1) requested = Math.min(10, Math.max(1, maximum));
   requested = Math.min(requested, Math.max(1, maximum));
@@ -326,7 +326,6 @@ async function processUnprocessedEpisodes(){
     });
   const pendingTotal = pending.length;
   const batchSize = Math.max(1, Math.min(
-    MAX_BULK_SUGGESTION_BATCH_SIZE,
     pendingTotal,
     Number.parseInt(bulkSuggestionBatchSize.value, 10) || 10
   ));

@@ -110,9 +110,10 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
     </div>
     <div class="controls subscription-batch">
       <label for="subscriptionBatchSize">Batch size</label>
-      <input id="subscriptionBatchSize" type="number" min="1" max="25" value="10">
+      <input id="subscriptionBatchSize" type="number" min="1" value="10">
       <span class="notice" id="subscriptionMissingCount">Loading channel metadata status…</span>
       <button class="primary" id="processMissingSubscriptions" disabled>Process subscriptions</button>
+      <button id="stopSubscriptionBatch" type="button" hidden>Stop after current</button>
     </div>
     <p class="notice" id="subscriptionBatchStatus" aria-live="polite">Missing channel metadata is processed in OPML order; OPML does not record when feeds were added.</p>
     <div id="subscriptionList" class="history-list" aria-live="polite"></div>
@@ -196,6 +197,7 @@ const exportSubscriptions = document.getElementById("exportSubscriptions");
 const subscriptionBatchSize = document.getElementById("subscriptionBatchSize");
 const subscriptionMissingCount = document.getElementById("subscriptionMissingCount");
 const processMissingSubscriptionsButton = document.getElementById("processMissingSubscriptions");
+const stopSubscriptionBatchButton = document.getElementById("stopSubscriptionBatch");
 const subscriptionBatchStatus = document.getElementById("subscriptionBatchStatus");
 const llmEnabled = document.getElementById("llmEnabled");
 const llmBaseUrl = document.getElementById("llmBaseUrl");
@@ -223,7 +225,7 @@ let hasSavedSlots = false;
 let posterSettingsInitialized = false;
 let currentSubscriptionFeeds = [];
 let processingSubscriptionBatch = false;
-const MAX_SUBSCRIPTION_BATCH_SIZE = 25;
+let stopSubscriptionBatchRequested = false;
 let activeTab = "subscriptions";
 let candidateHistorySnapshot = null;
 let candidateChannelMetadataSnapshot = null;
@@ -447,7 +449,7 @@ function subscriptionNeedsMetadata(feed){
 
 function updateSubscriptionBatchControls(){
   const missingCount = currentSubscriptionFeeds.filter(subscriptionNeedsMetadata).length;
-  const maximum = Math.min(MAX_SUBSCRIPTION_BATCH_SIZE, missingCount);
+  const maximum = missingCount;
   subscriptionMissingCount.textContent = missingCount
     ? `${missingCount} subscription${missingCount === 1 ? "" : "s"} missing a channel description or default tags.`
     : "All subscriptions have channel descriptions and default tags.";
@@ -461,6 +463,8 @@ function updateSubscriptionBatchControls(){
     : "All metadata processed";
   processMissingSubscriptionsButton.disabled = missingCount === 0 || processingSubscriptionBatch;
   subscriptionBatchSize.disabled = processingSubscriptionBatch || missingCount === 0;
+  stopSubscriptionBatchButton.hidden = !processingSubscriptionBatch;
+  stopSubscriptionBatchButton.disabled = stopSubscriptionBatchRequested;
 }
 
 async function processMissingSubscriptions(){
@@ -471,11 +475,15 @@ async function processMissingSubscriptions(){
     return;
   }
   const batchSize = Math.max(1, Math.min(
-    MAX_SUBSCRIPTION_BATCH_SIZE,
     pending.length,
     Number.parseInt(subscriptionBatchSize.value, 10) || 10
   ));
   const batch = pending.slice(0, batchSize);
+  const approved = window.confirm(
+    `Process first ${batch.length} of ${pending.length} incomplete subscriptions? ` +
+    "Channel context will be sent to the configured model and successful suggestions saved, one feed at a time. You can stop after the current feed."
+  );
+  if(!approved) return;
 
   try{
     const status = await requestJson("/api/status");
@@ -489,12 +497,16 @@ async function processMissingSubscriptions(){
   }
 
   processingSubscriptionBatch = true;
+  stopSubscriptionBatchRequested = false;
   updateSubscriptionBatchControls();
   let savedCount = 0;
+  let attemptedCount = 0;
   const failures = [];
   try{
     for(let index = 0; index < batch.length; index++){
+      if(stopSubscriptionBatchRequested) break;
       const feed = batch[index];
+      attemptedCount = index + 1;
       const progress = `${index + 1} of ${batch.length}`;
       subscriptionBatchStatus.textContent = `Processing ${progress}: ${feed.title}…`;
       statusBox.textContent = `Processing channel metadata ${progress}: ${feed.title}…`;
@@ -521,13 +533,19 @@ async function processMissingSubscriptions(){
     }
     await refreshSubscriptions();
     const failureDetails = failures.length ? ` Failures: ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? "; …" : ""}` : "";
-    statusBox.textContent = `Channel metadata processing finished: saved ${savedCount} of ${batch.length}.${failureDetails}`;
-    subscriptionBatchStatus.textContent = `Finished ${batch.length} requested; saved ${savedCount}, failed ${failures.length}.`;
+    const stopped = stopSubscriptionBatchRequested && attemptedCount < batch.length;
+    statusBox.textContent = stopped
+      ? `Channel metadata processing stopped after the current subscription: saved ${savedCount} of ${attemptedCount}.${failureDetails}`
+      : `Channel metadata processing finished: saved ${savedCount} of ${batch.length}.${failureDetails}`;
+    subscriptionBatchStatus.textContent = stopped
+      ? `Stopped after ${attemptedCount} of ${batch.length}; saved ${savedCount}, failed ${failures.length}.`
+      : `Finished ${batch.length} requested; saved ${savedCount}, failed ${failures.length}.`;
   }catch(error){
     statusBox.textContent = `Channel metadata processing stopped: ${error.message}`;
     subscriptionBatchStatus.textContent = "Could not refresh the subscription list after processing.";
   }finally{
     processingSubscriptionBatch = false;
+    stopSubscriptionBatchRequested = false;
     updateSubscriptionBatchControls();
   }
 }
@@ -840,6 +858,11 @@ document.getElementById("reloadSubscriptions").addEventListener("click", () => {
 });
 subscriptionBatchSize.addEventListener("input", updateSubscriptionBatchControls);
 processMissingSubscriptionsButton.addEventListener("click", processMissingSubscriptions);
+stopSubscriptionBatchButton.addEventListener("click", () => {
+  stopSubscriptionBatchRequested = true;
+  stopSubscriptionBatchButton.disabled = true;
+  subscriptionBatchStatus.textContent = "Stopping after the current subscription finishes…";
+});
 document.getElementById("refreshLlmDiagnostics").addEventListener("click", refreshLlmDiagnostics);
 llmDiagnostics.addEventListener("toggle", () => {
   if(llmDiagnostics.open) refreshLlmDiagnostics();
