@@ -613,7 +613,7 @@ def atomic_write_text(path, text):
 
 
 def upgrade_candidate_html(page, candidate_path=None):
-    if 'data-page-version="16"' in page:
+    if 'data-page-version="17"' in page:
         return None
     episode_marker = "const EPISODES = "
     episode_start = page.find(episode_marker)

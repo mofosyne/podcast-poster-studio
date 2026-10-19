@@ -672,7 +672,7 @@ class LocalWorkflowTests(unittest.TestCase):
 
             saved_page = candidate_path.read_text(encoding="utf-8")
 
-        self.assertIn('data-page-version="16"', page)
+        self.assertIn('data-page-version="17"', page)
         self.assertIn("choose up to six for the poster", page)
         self.assertIn("candidate-selection", page)
         self.assertIn('id="bulkSuggestionBatchSize"', page)
