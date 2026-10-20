@@ -635,9 +635,13 @@ for i, item in enumerate(data if poster_layout == "list" else []):
         date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
     show_name_max_width = max(10 * mm, text_w - date_width - 4 * mm)
 
+    # Shrink long show names before falling back to an ellipsis.
+    show_font_size = 16
+    while c.stringWidth(item["show"], "Helvetica-Bold", show_font_size) > show_name_max_width and show_font_size > 11:
+        show_font_size -= 0.5
     c.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
-    c.setFont("Helvetica-Bold", 16)
-    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", 16, show_name_max_width)
+    c.setFont("Helvetica-Bold", show_font_size)
+    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", show_font_size, show_name_max_width)
     c.drawString(text_x, text_center + 8 * mm, show_name)
 
     c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))

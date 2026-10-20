@@ -66,6 +66,7 @@ def main():
                 "feed_description": description,
                 "channel_artwork_path": f"user-data/cache/artwork/{filename}",
                 "artwork_path": f"user-data/cache/artwork/{filename}",
+                "artwork": f"cache/artwork/{filename}",
                 "tags": tags,
             })
             if index <= 2:
@@ -89,7 +90,12 @@ def main():
             "poster_layout": "list",
             "poster_theme": "dark",
             "subscription_metadata": saved_metadata,
-            "slots": [],
+            # Two picks in the poster draft, so the screenshot shows the selection tray.
+            "slots": [
+                {key: episode[key] for key in ("show", "episode", "date", "url", "feed_url", "description", "artwork_path", "tags")}
+                | {"type": "fixed", "summary": episode["description"]}
+                for episode in episodes[:2]
+            ],
             "llm": {"enabled": False},
         }), encoding="utf-8")
 
@@ -110,7 +116,7 @@ def main():
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
                     "--hide-scrollbars",
-                    "--window-size=1440,1500",
+                    "--window-size=1440,1100",
                     "--virtual-time-budget=4000",
                     f"--screenshot={OUTPUT}",
                     f"http://127.0.0.1:{httpd.server_port}/",
@@ -124,6 +130,14 @@ def main():
 
     if not OUTPUT.is_file():
         raise RuntimeError("Browser did not create the screenshot.")
+    # Headless Chromium paints the window a little taller than the page's viewport, which
+    # leaves a band of bare background under the fixed selection tray; trim it.
+    image = Image.open(OUTPUT).convert("RGB")
+    background = image.getpixel((image.width - 1, image.height - 1))
+    bottom = image.height
+    while bottom > 1 and all(image.getpixel((x, bottom - 1)) == background for x in range(0, image.width, 4)):
+        bottom -= 1
+    image.crop((0, 0, image.width, bottom)).save(OUTPUT)
     print(OUTPUT)
 
 

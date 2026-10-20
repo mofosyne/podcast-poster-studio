@@ -60,6 +60,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Podcast Episode Archive</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111412'/%3E%3Cpath d='M9 22V10l14 6z' fill='%234fd1c5'/%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;--bg:#111412;--panel:#1a1f1c;--line:#303a34;--muted:#9ba79f;--text:#edf2ee;--accent:#4fd1c5;--orange:#f0ad63}
 *{box-sizing:border-box}
@@ -68,18 +69,26 @@ body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,san
 main{max-width:980px;margin:36px auto;padding:0 22px}
 h1{margin:0;font-size:clamp(25px,4vw,38px);letter-spacing:.02em}
 .subtitle{color:var(--muted);margin:5px 0 22px}
-.status{color:var(--muted);font-size:13px;margin-bottom:18px}
-.controls{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}
-input[type=search]{flex:1;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:11px 13px;font:inherit}
+.status{color:var(--muted);font-size:13px;margin-bottom:14px}
+.controls{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+input[type=search]{flex:1;min-width:220px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:10px 13px;font:inherit}
 .batch-size-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;white-space:nowrap}
-.batch-size-control input{width:72px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px;font:inherit}
-button{background:var(--accent);color:#10201d;border:0;border-radius:7px;padding:10px 15px;font-weight:700;cursor:pointer}
-button:disabled{opacity:.4;cursor:default}
+.batch-size-control input{width:72px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:7px;font:inherit}
+button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button.primary{background:var(--accent);color:#10201d;border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.45;cursor:default}
+.view-filters{display:flex;gap:6px;flex-wrap:wrap}
+.chip{border-radius:999px;padding:6px 13px;font-size:13px;color:var(--muted)}
+.chip[aria-pressed="true"]{background:rgba(79,209,197,.12);color:var(--accent);border-color:var(--accent)}
+.ai-tools{padding:9px 12px;border:1px solid var(--line);border-radius:7px;background:#171c19}
+.ai-label{font-weight:700;color:var(--accent);font-size:13px}
 .shortlist-button{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-weight:600;font-size:13px;white-space:nowrap}
 .shortlist-button.active{background:rgba(79,209,197,.12);color:var(--accent);border-color:var(--accent)}
-.episode{display:grid;grid-template-columns:26px 64px minmax(0,1fr) auto auto;gap:12px;align-items:start;padding:15px 14px;border-top:1px solid var(--line)}
+.episode{display:grid;grid-template-columns:26px 64px minmax(0,1fr) auto auto;gap:12px;align-items:start;padding:15px 14px;border-top:1px solid var(--line);cursor:pointer}
 .episode:hover{background:#171c19}
-.episode input{accent-color:var(--accent);width:17px;height:17px;margin:4px 0 0}
+.episode.selected{background:rgba(79,209,197,.07);box-shadow:inset 3px 0 0 var(--accent)}
+.episode input{accent-color:var(--accent);width:17px;height:17px;margin:4px 0 0;cursor:pointer}
 .thumbnail,.thumbnail-placeholder{width:64px;height:64px;border-radius:5px;background:var(--panel)}
 .thumbnail{object-fit:cover}
 .thumbnail-placeholder{display:grid;place-items:center;color:var(--accent);font-size:28px}
@@ -88,7 +97,8 @@ button:disabled{opacity:.4;cursor:default}
 a{color:inherit;text-decoration:none}
 a:hover{color:var(--accent);text-decoration:underline}
 .meta{font-size:13px;color:var(--muted);margin-top:3px}
-.description{margin-top:7px;color:var(--muted);font-size:13px}
+.not-in-scan{font-size:12px;color:var(--orange);margin-top:3px}
+.description{margin-top:7px;color:var(--muted);font-size:13px;cursor:auto}
 .description summary{color:var(--accent);cursor:pointer}
 .description p{margin:5px 0 0;line-height:1.45}
 .episode-tags{margin-top:5px;color:var(--accent);font-size:12px}
@@ -100,75 +110,105 @@ a:hover{color:var(--accent);text-decoration:underline}
 .review-card{padding:16px 0;border-top:1px solid var(--line)}
 .review-title{font-weight:700}
 .review-meta{font-size:13px;color:var(--muted);margin:3px 0 10px}
-.review-card label{display:block;color:var(--muted);font-size:13px}
+.review-card label{display:block;color:var(--muted);font-size:13px;margin-top:8px}
 .review-card textarea,.review-card input{display:block;width:100%;margin-top:5px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:10px;font:inherit}
 .review-card textarea{min-height:76px;resize:vertical}
 .review-count{font-size:12px;color:var(--muted);text-align:right}
-.llm-suggest-feedback{font-size:12px;color:var(--muted);margin:3px 0 8px;min-height:1em}
 .review-actions{display:flex;justify-content:space-between;gap:10px;margin:20px 0 40px}
 .date{font-size:13px;color:var(--orange);white-space:nowrap}
 .posted-badge{display:inline-block;margin-left:8px;padding:1px 7px;border:1px solid #8b6841;border-radius:999px;color:var(--orange);font-size:11px;font-weight:600;vertical-align:1px}
 .llm-processed-badge{display:inline-block;margin-left:8px;padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:var(--accent);font-size:11px;font-weight:600;vertical-align:1px}
-.llm-draft-preview{margin-top:7px;padding:7px 9px;border-left:2px solid var(--accent);background:#171c19}
+.llm-draft-preview{margin-top:7px;padding:7px 9px;border-left:2px solid var(--accent);background:#171c19;cursor:auto}
 .llm-draft-preview summary{cursor:pointer;color:var(--accent);font-size:13px}
 .llm-draft-preview p{margin:6px 0;color:var(--text);font-size:13px}
 .llm-draft-tags{color:var(--muted);font-size:12px}
-.bulk-suggestion-status{min-height:1.5em;color:var(--muted);font-size:13px;margin:-10px 0 14px}
+.bulk-suggestion-status{flex-basis:100%;color:var(--muted);font-size:13px}
 .empty{color:var(--muted);padding:28px 14px;border-top:1px solid var(--line)}
 .paging{display:flex;justify-content:center;align-items:center;gap:18px;margin:18px 0 34px;color:var(--muted);font-size:13px}
-.paging button{background:var(--panel);color:var(--text);border:1px solid var(--line)}
 .tray{position:fixed;bottom:0;left:0;right:0;background:#1a201d;border-top:1px solid var(--line);padding:12px 20px;box-shadow:0 -8px 24px #0005}
 .tray-inner{max-width:980px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:15px}
 #selection{color:var(--muted);font-size:13px}
 .toast{position:fixed;bottom:78px;left:50%;transform:translateX(-50%);background:var(--orange);color:#21180e;padding:8px 15px;border-radius:6px;display:none}
 .toast.show{display:block}
-@media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date,.shortlist-button{grid-column:3}.controls{flex-wrap:wrap}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
+html.embedded body{padding-bottom:0;background:transparent}
+html.embedded main{max-width:none;margin:0;padding:2px 2px 4px}
+html.embedded h1,html.embedded #intro,html.embedded .tray,html.embedded #clear{display:none}
+html.embedded .paging{margin-bottom:6px}
+@media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date,.shortlist-button{grid-column:3}.shortlist-button{justify-self:start}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
 </style>
 </head>
-<body data-page-version="19">
+<body data-page-version="20">
 <main>
   <h1>Podcast episode archive</h1>
-  <p class="subtitle">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
+  <p class="subtitle" id="intro">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
   <div class="status">__EPISODE_COUNT__ episodes from __FEED_COUNT__ feeds · __POSTED_COUNT__ previously posted · generated __GENERATED__ · __CACHE_STATUS__</div>
-  <div class="controls" id="controls"><input id="search" type="search" placeholder="Filter by show or episode title"><button id="clear">Clear selection</button><label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" step="1" value="10"></label><button id="suggestUnprocessed" type="button" hidden>Process newest 10</button><button id="stopBulkSuggestions" type="button" hidden>Stop after current</button></div>
-  <div id="bulkSuggestionStatus" class="bulk-suggestion-status" aria-live="polite">Choose how many of the newest eligible episodes to process per batch. Another batch starts only when you choose it.</div>
+  <div class="controls" id="controls">
+    <input id="search" type="search" placeholder="Filter by show or episode title (press / to search)" aria-label="Filter episodes by show or title">
+    <div class="view-filters" role="group" aria-label="Show episodes">
+      <button type="button" class="chip" data-filter="all" aria-pressed="true">All</button>
+      <button type="button" class="chip" data-filter="shortlist" aria-pressed="false" id="shortlistFilter" hidden>★ Shortlisted <span id="shortlistFilterCount">0</span></button>
+      <button type="button" class="chip" data-filter="selected" aria-pressed="false">✓ Selected <span id="selectedFilterCount">0</span></button>
+    </div>
+    <button id="clear" type="button">Clear selection</button>
+  </div>
+  <div class="controls ai-tools" id="aiTools" hidden>
+    <span class="ai-label">AI drafts</span>
+    <label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" step="1" value="10"></label>
+    <button id="suggestUnprocessed" type="button">Process newest 10</button>
+    <button id="stopBulkSuggestions" type="button" hidden>Stop after current</button>
+    <div id="bulkSuggestionStatus" class="bulk-suggestion-status" aria-live="polite">Choose how many of the newest eligible episodes to process per batch. Another batch starts only when you choose it.</div>
+  </div>
   <div id="list"></div>
   <div class="paging" id="paging"><button id="previousPage" type="button">Previous</button><span id="pageStatus"></span><button id="nextPage" type="button">Next</button></div>
   <section id="selectionReview" hidden>
     <h2>Review</h2>
-    <p class="subtitle">Use optional LLM suggestions for concise summaries and episode tags, then review and edit every draft. Episode details are sent to the configured endpoint only when you request a suggestion.</p>
-    <div id="llmSuggestionStatus" class="meta" aria-live="polite">LLM suggestions are unavailable until enabled and configured in Settings.</div>
+    <p class="subtitle">Edit the poster summary and tags for each selected episode, then download them as fixed slots for <code>user-data/config.json</code>.</p>
     <div id="channelReviewList"></div>
     <div id="reviewList"></div>
-    <div class="review-actions"><button id="backToEpisodes" type="button">Back to episodes</button><div><button id="downloadSlots" type="button">Download fixed slots</button> <button id="downloadSingle" type="button" hidden>Generate single-episode poster</button></div></div>
+    <div class="review-actions"><button id="backToEpisodes" type="button">Back to episodes</button><button id="downloadSlots" class="primary" type="button">Download fixed slots</button></div>
   </section>
 </main>
-<div class="tray" id="tray"><div class="tray-inner"><div><strong id="selection">0 selected</strong><div class="meta">Select episodes, then edit summaries in the Review tab or preview in Poster.</div></div><button id="export" disabled>Review</button></div></div>
-<div id="toast" class="toast"></div>
+<div class="tray" id="tray"><div class="tray-inner"><div><strong id="selection">0 selected</strong><div class="meta">Select up to six episodes, then review their poster text and download them as fixed slots.</div></div><button id="export" class="primary" disabled>Review</button></div></div>
+<div id="toast" class="toast" role="status"></div>
 <script>
 const EPISODES = __EPISODES__;
 const list = document.getElementById("list");
 const controls = document.getElementById("controls");
+const aiTools = document.getElementById("aiTools");
 const paging = document.getElementById("paging");
 const selectionReview = document.getElementById("selectionReview");
 const reviewList = document.getElementById("reviewList");
 const channelReviewList = document.getElementById("channelReviewList");
-const llmSuggestionStatus = document.getElementById("llmSuggestionStatus");
 const tray = document.getElementById("tray");
 const search = document.getElementById("search");
 const pageStatus = document.getElementById("pageStatus");
 const previousPage = document.getElementById("previousPage");
 const nextPage = document.getElementById("nextPage");
+const shortlistFilter = document.getElementById("shortlistFilter");
+const shortlistFilterCount = document.getElementById("shortlistFilterCount");
+const selectedFilterCount = document.getElementById("selectedFilterCount");
 const PAGE_SIZE = 200;
 const MAX_POSTER_SELECTION = 6;
+// Embedded in the studio (server.py serves this page in an iframe), the poster draft is
+// saved on the server through the parent page. Opened as a standalone file, the
+// selection stays local and is exported as fixed slots instead.
+const runningInServer = (() => {
+  try{
+    return window.parent !== window && window.parent.location.origin === window.location.origin;
+  }catch(error){
+    return false;
+  }
+})();
+if(runningInServer) document.documentElement.classList.add("embedded");
 
 let currentPage = 0;
+let viewFilter = "all";
 const selection = new Set();
+const episodeIndexByUrl = new Map(EPISODES.map((episode, index) => [episode.url, index]));
 const selectionLabel = document.getElementById("selection");
 const exportButton = document.getElementById("export");
 const toast = document.getElementById("toast");
 const suggestUnprocessedButton = document.getElementById("suggestUnprocessed");
-const bulkSuggestionBatchControl = document.getElementById("bulkSuggestionBatchControl");
 const bulkSuggestionBatchSize = document.getElementById("bulkSuggestionBatchSize");
 const stopBulkSuggestionsButton = document.getElementById("stopBulkSuggestions");
 const bulkSuggestionStatus = document.getElementById("bulkSuggestionStatus");
@@ -179,19 +219,27 @@ const reviewedChannelEditors = new Map();
 const reviewedChannelDescriptionOverrides = new Set();
 const reviewedChannelTagOverrides = new Set();
 let llmSuggestionsReady = false;
-let llmSuggestionDisabledReason = "Enable the LLM connection and choose a model in Settings.";
 let llmSuggestionVersion = 0;
 let llmSuggestionsLoaded = false;
 let bulkSuggestionsRunning = false;
 let stopBulkSuggestionsRequested = false;
-const runningInServer = location.protocol === "http:" && location.hostname === "127.0.0.1" && location.port === "8765";
-const downloadSlotsButton = document.getElementById("downloadSlots");
+let shortlistedUrls = new Set();
+let toastTimer = null;
 let query = "";
 
+function postToStudio(message){
+  window.parent.postMessage(message, window.location.origin);
+}
+
 function showToast(message){
+  if(runningInServer){
+    postToStudio({type:"toast", message});
+    return;
+  }
   toast.textContent = message;
   toast.classList.add("show");
-  setTimeout(() => toast.classList.remove("show"), 1800);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("show"), 2400);
 }
 
 function defaultPosterSummary(description){
@@ -220,25 +268,16 @@ function suggestionIsCurrent(episode){
   return Boolean(episode.llm_suggestion && Number(episode.llm_suggestion.suggestion_version) === llmSuggestionVersion);
 }
 
-function updateSuggestionButtons(){
-  for(const button of document.querySelectorAll(".llm-suggest")){
-    const episode = EPISODES[Number(button.dataset.episodeIndex)];
-    const version = Number(episode?.llm_suggestion?.suggestion_version || 0);
-    button.textContent = version > 0
-      ? (version === llmSuggestionVersion ? "Regenerate summary + tags" : "Update old draft")
-      : "Suggest summary + tags";
-    button.disabled = !llmSuggestionsReady;
-    button.title = llmSuggestionsReady ? "Draft a summary and episode-specific tag suggestions" : llmSuggestionDisabledReason;
-  }
-  updateBulkSuggestionControls();
+function pendingSuggestionEpisodes(){
+  return EPISODES.map((episode, index) => ({episode, index}))
+    .filter(({episode}) => !episode.not_in_scan && !suggestionIsCurrent(episode));
 }
 
 function updateBulkSuggestionControls(){
-  suggestUnprocessedButton.hidden = !runningInServer;
-  bulkSuggestionBatchControl.hidden = !runningInServer;
+  aiTools.hidden = !runningInServer || (!llmSuggestionsReady && !bulkSuggestionsRunning);
   stopBulkSuggestionsButton.hidden = !bulkSuggestionsRunning;
   stopBulkSuggestionsButton.disabled = stopBulkSuggestionsRequested;
-  const pending = EPISODES.filter(episode => !suggestionIsCurrent(episode)).length;
+  const pending = pendingSuggestionEpisodes().length;
   const maximum = pending;
   let requested = Number.parseInt(bulkSuggestionBatchSize.value, 10);
   if(!Number.isFinite(requested) || requested < 1) requested = Math.min(10, Math.max(1, maximum));
@@ -256,34 +295,28 @@ function updateBulkSuggestionControls(){
 
 function applyLlmSettings(settings){
   llmSuggestionsReady = settings?.enabled === true;
-  llmSuggestionDisabledReason = settings?.reason || "Enable the LLM connection and choose a model in Settings.";
-  llmSuggestionStatus.hidden = llmSuggestionsReady;
-  llmSuggestionStatus.textContent = llmSuggestionsReady
-    ? "LLM suggestions are ready."
-    : `LLM suggestions unavailable: ${llmSuggestionDisabledReason}`;
-  updateSuggestionButtons();
+  updateBulkSuggestionControls();
 }
 
-function suggestionRequestEpisode(index, currentSummary="", episodeTags=null){
+function suggestionRequestEpisode(index){
   const episode = EPISODES[index];
-  const channel = reviewedChannelEditors.get(episode.feed_url);
   return {
     url:episode.url,
     show:episode.show,
     title:episode.episode,
-    description:episode.description || "",
-    channel_description:channel ? channel.description.value : (episode.channel_description || episode.feed_description || ""),
-    channel_tags:parseTags(channel ? channel.tags.value : (episode.tags || [])),
-    episode_tags:episodeTags || episode.llm_suggestion?.tags || episode.tags || [],
-    current_summary:currentSummary || episode.llm_suggestion?.summary || "",
+    description:(episode.description || "").slice(0, 12000),
+    channel_description:(episode.channel_description || episode.feed_description || "").slice(0, 400),
+    channel_tags:parseTags(episode.tags || []).slice(0, 12),
+    episode_tags:parseTags(episode.llm_suggestion?.tags || episode.tags || []).slice(0, 12),
+    current_summary:episode.llm_suggestion?.summary || "",
   };
 }
 
-async function requestEpisodeSuggestion(index, currentSummary="", episodeTags=null){
+async function requestEpisodeSuggestion(index){
   const response = await fetch("/api/llm/suggest", {
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({episode:suggestionRequestEpisode(index, currentSummary, episodeTags)})
+    body:JSON.stringify({episode:suggestionRequestEpisode(index)})
   });
   const result = await response.json();
   if(!response.ok) throw new Error(result.error || "LLM suggestion failed.");
@@ -296,31 +329,8 @@ async function requestEpisodeSuggestion(index, currentSummary="", episodeTags=nu
   return result;
 }
 
-async function suggestEpisode(index, summaryInput, tagsInput, summaryCount, button, feedback){
-  feedback.textContent = "Requesting a draft from the configured model…";
-  button.disabled = true;
-  button.textContent = "Generating suggestions…";
-  try{
-    const result = await requestEpisodeSuggestion(index, summaryInput.value, parseTags(tagsInput.value));
-    summaryInput.value = result.summary;
-    summaryCount.textContent = `${summaryInput.value.length}/400`;
-    tagsInput.value = result.tags.join(", ");
-    reviewedTagOverrides.add(index);
-    reportSelection();
-    render();
-    feedback.textContent = "Draft suggestions saved. Review and edit them before generating the poster.";
-    showToast("Draft suggestions saved. Review before generating the poster.");
-  }catch(error){
-    feedback.textContent = `Suggestion failed: ${error.message} See Settings → Recent LLM diagnostics for details.`;
-    showToast(`Could not get suggestions: ${error.message}`);
-  }finally{
-    updateSuggestionButtons();
-  }
-}
-
 async function processUnprocessedEpisodes(){
-  const pending = EPISODES.map((episode, index) => ({episode, index}))
-    .filter(({episode}) => !suggestionIsCurrent(episode))
+  const pending = pendingSuggestionEpisodes()
     .sort((left, right) => {
       const leftDate = Date.parse(left.episode.published_at || "") || 0;
       const rightDate = Date.parse(right.episode.published_at || "") || 0;
@@ -363,9 +373,9 @@ async function processUnprocessedEpisodes(){
     bulkSuggestionsRunning = false;
     render();
     const stopped = stopBulkSuggestionsRequested;
-    const remaining = EPISODES.filter(episode => !suggestionIsCurrent(episode)).length;
+    const remaining = pendingSuggestionEpisodes().length;
     const stoppingText = stopped ? " Stopped after the current episode." : "";
-    bulkSuggestionStatus.textContent = `${completed} saved, ${failed} failed.${stoppingText} ${remaining} episodes remain for later batches.${lastError ? ` Last error: ${lastError}` : ""}`;
+    bulkSuggestionStatus.textContent = `${completed} saved, ${failed} failed.${stoppingText} ${remaining} episodes remain for later batches.${lastError ? ` Last error: ${lastError} See Settings → Recent LLM diagnostics.` : ""}`;
     updateBulkSuggestionControls();
   }
 }
@@ -388,6 +398,7 @@ async function loadLlmSuggestions(){
   }
 }
 
+// Standalone export: summaries and tags come from the review editors.
 function buildSlotForIndex(index){
   const episode = EPISODES[index];
   const slot = {
@@ -414,7 +425,62 @@ function buildSelectedSlots(){
   return [...selection].map(buildSlotForIndex);
 }
 
-let shortlistedUrls = new Set();
+// Studio draft: start from the saved AI draft when there is one, otherwise the
+// feed description and channel tags. The studio's Edit step refines it from there.
+function draftSlotForIndex(index){
+  const episode = EPISODES[index];
+  const slot = {
+    type:"fixed",
+    show:episode.show,
+    episode:episode.episode,
+    date:episode.date,
+    url:episode.url,
+    feed_url:episode.feed_url
+  };
+  const aiDraft = episode.llm_suggestion;
+  const summary = (aiDraft?.summary || episode.summary || defaultPosterSummary(episode.description)).trim().slice(0, 400);
+  if(summary) slot.summary = summary;
+  slot.tags = parseTags(aiDraft ? aiDraft.tags : (episode.tags || [])).slice(0, 12);
+  if(episode.duration) slot.duration = episode.duration;
+  if(episode.artwork_path) slot.artwork_path = episode.artwork_path;
+  return slot;
+}
+
+// Shortlisted or chosen episodes can drop out of a feed after a rescan; keep them
+// visible (and removable) using the details saved with them.
+function addOrphanEpisode(entry){
+  if(!entry || typeof entry.url !== "string" || episodeIndexByUrl.has(entry.url)) return;
+  const artworkPath = typeof entry.artwork_path === "string" ? entry.artwork_path : "";
+  const episode = {
+    show:String(entry.show || ""),
+    episode:String(entry.episode || ""),
+    date:String(entry.date || ""),
+    published_at:"",
+    url:entry.url,
+    feed_url:String(entry.feed_url || ""),
+    description:"",
+    summary:typeof entry.summary === "string" ? entry.summary : "",
+    duration:typeof entry.duration === "string" ? entry.duration : "",
+    tags:Array.isArray(entry.tags) ? entry.tags : [],
+    not_in_scan:true,
+  };
+  if(artworkPath){
+    episode.artwork_path = artworkPath;
+    episode.artwork = `/cache/artwork/${encodeURIComponent(artworkPath.split("/").pop())}`;
+  }
+  EPISODES.push(episode);
+  episodeIndexByUrl.set(entry.url, EPISODES.length - 1);
+}
+
+function applyDraft(slots){
+  selection.clear();
+  for(const slot of slots){
+    if(!slot || typeof slot.url !== "string") continue;
+    addOrphanEpisode(slot);
+    selection.add(episodeIndexByUrl.get(slot.url));
+  }
+  render();
+}
 
 async function loadShortlist(){
   if(!runningInServer) return;
@@ -422,7 +488,9 @@ async function loadShortlist(){
     const response = await fetch("/api/shortlist");
     if(!response.ok) return;
     const data = await response.json();
-    shortlistedUrls = new Set((data.shortlist || []).map(item => item.url));
+    const entries = (Array.isArray(data.shortlist) ? data.shortlist : []).filter(item => item && typeof item.url === "string");
+    entries.forEach(addOrphanEpisode);
+    shortlistedUrls = new Set(entries.map(item => item.url));
     render();
   }catch(error){
     // Shortlist state is best-effort; leave the list unmarked on failure.
@@ -447,11 +515,12 @@ async function toggleShortlist(index, button){
       const response = await fetch("/api/shortlist", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify(buildSlotForIndex(index))
+        body:JSON.stringify(draftSlotForIndex(index))
       });
       const result = await response.json();
       if(!response.ok) throw new Error(result.error || "Could not add to shortlist.");
       shortlistedUrls.add(episode.url);
+      showToast(`Shortlisted “${episode.episode}”. Find it under ★ Shortlisted.`);
     }
   }catch(error){
     showToast(error.message);
@@ -461,32 +530,43 @@ async function toggleShortlist(index, button){
   }
 }
 
-function syncSelectionFromUrls(urls){
-  const urlSet = new Set(urls);
-  let changed = false;
-  EPISODES.forEach((episode, index) => {
-    if(urlSet.has(episode.url) && !selection.has(index)){
-      selection.add(index);
-      changed = true;
+function setEpisodeSelected(index, selected){
+  if(selected === selection.has(index)) return true;
+  if(selected && selection.size >= MAX_POSTER_SELECTION){
+    showToast(`A poster holds up to ${MAX_POSTER_SELECTION} episodes. Remove one before adding another.`);
+    return false;
+  }
+  const episode = EPISODES[index];
+  if(selected){
+    selection.add(index);
+    if(episode.previously_posted){
+      const status = episode.previously_posted.print_status;
+      showToast(status === "not_printed"
+        ? `Heads up: also on an unprinted poster (${episode.previously_posted.edition}).`
+        : `Heads up: already appeared in ${episode.previously_posted.edition}.`);
     }
-  });
-  // Only refresh checkbox state here; the parent page already has the
-  // authoritative selection (it just told us about it), so don't call
-  // reportSelection() and risk overwriting it with re-derived defaults.
-  if(changed) render();
+  } else selection.delete(index);
+  if(runningInServer){
+    postToStudio(selected ? {type:"draft-add", slot:draftSlotForIndex(index)} : {type:"draft-remove", key:episode.url});
+  }
+  return true;
 }
 
-function reportSelection(){
-  if(runningInServer){
-    window.parent.postMessage({type:"candidate-selection", slots:buildSelectedSlots()}, window.location.origin);
-  }
+function emptyMessage(){
+  if(query.trim()) return "No episodes match that filter.";
+  if(viewFilter === "shortlist") return "Nothing shortlisted yet. Use ☆ Shortlist on any episode to keep it for a later poster.";
+  if(viewFilter === "selected") return "No episodes selected yet. Tick up to six episodes for this poster.";
+  return "No episodes found. Scan your subscriptions to build the list.";
 }
 
 function render(){
   const needle = query.trim().toLowerCase();
-  const matches = EPISODES.map((episode, index) => ({episode, index})).filter(({episode}) =>
-    !needle || `${episode.show} ${episode.episode}`.toLowerCase().includes(needle)
-  );
+  const matches = EPISODES.map((episode, index) => ({episode, index})).filter(({episode, index}) => {
+    if(viewFilter === "selected" && !selection.has(index)) return false;
+    if(viewFilter === "shortlist" && !shortlistedUrls.has(episode.url)) return false;
+    if(viewFilter === "all" && episode.not_in_scan && !selection.has(index) && !shortlistedUrls.has(episode.url)) return false;
+    return !needle || `${episode.show} ${episode.episode}`.toLowerCase().includes(needle);
+  });
   const pageCount = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
   currentPage = Math.min(currentPage, pageCount - 1);
   const firstIndex = currentPage * PAGE_SIZE;
@@ -495,33 +575,26 @@ function render(){
   if(!matches.length){
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "No episodes match that filter.";
+    empty.textContent = emptyMessage();
     list.append(empty);
   }
   for(const {episode, index} of visibleMatches){
     const row = document.createElement("div");
-    row.className = "episode";
+    row.className = selection.has(index) ? "episode selected" : "episode";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = selection.has(index);
     checkbox.setAttribute("aria-label", `Select ${episode.episode} from ${episode.show}`);
     checkbox.addEventListener("change", () => {
-      if(checkbox.checked && selection.size >= MAX_POSTER_SELECTION){
-        checkbox.checked = false;
-        showToast(`Select up to ${MAX_POSTER_SELECTION} episodes for one poster.`);
-        return;
-      }
-      if(checkbox.checked){
-        selection.add(index);
-        if(episode.previously_posted){
-          const status = episode.previously_posted.print_status;
-          const message = status === "not_printed"
-            ? `Included in an unprinted poster: ${episode.previously_posted.edition}.`
-            : `Already appeared in ${episode.previously_posted.edition}.`;
-          showToast(message);
-        }
-      } else selection.delete(index);
-      updateSelection();
+      if(!setEpisodeSelected(index, checkbox.checked)) checkbox.checked = !checkbox.checked;
+      row.classList.toggle("selected", selection.has(index));
+      if(viewFilter === "selected") render();
+      else updateSelection();
+    });
+    row.addEventListener("click", event => {
+      if(event.target.closest("a, button, input, summary, details, label")) return;
+      if(String(window.getSelection?.() || "").trim()) return;
+      checkbox.click();
     });
     let thumbnail;
     if(episode.artwork){
@@ -568,6 +641,12 @@ function render(){
     meta.className = "meta";
     meta.textContent = episode.duration ? `${episode.duration} listen` : "Duration not listed";
     body.append(show, title, meta);
+    if(episode.not_in_scan){
+      const note = document.createElement("div");
+      note.className = "not-in-scan";
+      note.textContent = "No longer in the latest feed scan; kept from your poster or shortlist.";
+      body.append(note);
+    }
     if(Array.isArray(episode.tags) && episode.tags.length){
       const tags = document.createElement("div");
       tags.className = "episode-tags";
@@ -613,7 +692,10 @@ function render(){
     }
     const date = document.createElement("div");
     date.className = "date";
-    date.textContent = new Date(episode.published_at).toLocaleDateString(undefined, {year:"numeric", month:"short", day:"numeric"});
+    const published = Date.parse(episode.published_at || "");
+    date.textContent = Number.isFinite(published)
+      ? new Date(published).toLocaleDateString(undefined, {year:"numeric", month:"short", day:"numeric"})
+      : episode.date;
     const shortlistButton = document.createElement("button");
     shortlistButton.type = "button";
     const isShortlisted = shortlistedUrls.has(episode.url);
@@ -627,6 +709,8 @@ function render(){
     row.append(checkbox, thumbnail, body, date, shortlistButton);
     list.append(row);
   }
+  paging.hidden = !selectionReview.hidden;
+  previousPage.hidden = nextPage.hidden = pageCount <= 1;
   previousPage.disabled = currentPage === 0;
   nextPage.disabled = currentPage >= pageCount - 1;
   pageStatus.textContent = matches.length
@@ -638,15 +722,38 @@ function render(){
 function updateSelection(){
   selectionLabel.textContent = `${selection.size} selected`;
   exportButton.disabled = selection.size === 0;
-  if(downloadSingleButton) downloadSingleButton.hidden = true;
+  selectedFilterCount.textContent = String(selection.size);
+  shortlistFilterCount.textContent = String(shortlistedUrls.size);
+  shortlistFilter.hidden = !runningInServer;
   updateBulkSuggestionControls();
-  reportSelection();
+}
+
+function goToPage(page){
+  currentPage = page;
+  render();
+  if(runningInServer) postToStudio({type:"scroll-top"});
+  else window.scrollTo(0, 0);
 }
 
 search.addEventListener("input", event => { query = event.target.value; currentPage = 0; render(); });
-previousPage.addEventListener("click", () => { currentPage -= 1; render(); });
-nextPage.addEventListener("click", () => { currentPage += 1; render(); });
+previousPage.addEventListener("click", () => goToPage(currentPage - 1));
+nextPage.addEventListener("click", () => goToPage(currentPage + 1));
 document.getElementById("clear").addEventListener("click", () => { selection.clear(); render(); });
+for(const chip of document.querySelectorAll("[data-filter]")){
+  chip.addEventListener("click", () => {
+    viewFilter = chip.dataset.filter;
+    for(const other of document.querySelectorAll("[data-filter]")) other.setAttribute("aria-pressed", String(other === chip));
+    currentPage = 0;
+    render();
+  });
+}
+document.addEventListener("keydown", event => {
+  if(event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+  if(event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]")) return;
+  event.preventDefault();
+  search.focus();
+});
+
 function openSelectionReview(){
   const previousSummaries = new Map(
     [...reviewedSummaries].map(([index, textarea]) => [index, textarea.value])
@@ -693,7 +800,6 @@ function openSelectionReview(){
       for(const episode of EPISODES){
         if(episode.feed_url === feedUrl) episode.channel_description = descriptionInput.value;
       }
-      reportSelection();
     });
     tagsInput.addEventListener("input", () => {
       reviewedChannelTagOverrides.add(feedUrl);
@@ -703,7 +809,6 @@ function openSelectionReview(){
         const episodeTagsInput = reviewedTags.get(index);
         if(episodeTagsInput && !reviewedTagOverrides.has(index)) episodeTagsInput.value = tags.join(", ");
       }
-      reportSelection();
     });
     details.append(heading, descriptionLabel, tagsLabel);
     channelReviewList.append(details);
@@ -720,44 +825,25 @@ function openSelectionReview(){
     const meta = document.createElement("div");
     meta.className = "review-meta";
     meta.textContent = `${episode.date} · ${episode.duration || "Duration not listed"}`;
-    const suggestButton = document.createElement("button");
-    suggestButton.type = "button";
-    suggestButton.className = "llm-suggest";
-    suggestButton.dataset.episodeIndex = String(index);
-    suggestButton.textContent = "Suggest summary + tags";
-    suggestButton.hidden = !runningInServer;
-    suggestButton.disabled = !llmSuggestionsReady;
-    suggestButton.title = llmSuggestionDisabledReason;
-    const suggestionFeedback = document.createElement("div");
-    suggestionFeedback.className = "llm-suggest-feedback";
-    suggestionFeedback.setAttribute("aria-live", "polite");
     const tagsLabel = document.createElement("label");
     tagsLabel.textContent = "Episode tags (edit these suggestions for this episode only)";
     const tagsInput = document.createElement("input");
     tagsInput.type = "text";
     tagsInput.maxLength = 500;
-    tagsInput.value = previousTags.get(index) ?? (episode.llm_suggestion?.tags || episode.tags || []).join(", ");
-    if(episode.llm_suggestion) reviewedTagOverrides.add(index);
-    tagsInput.addEventListener("input", () => {
-      reviewedTagOverrides.add(index);
-      reportSelection();
-    });
+    tagsInput.value = previousTags.get(index) ?? (episode.tags || []).join(", ");
+    tagsInput.addEventListener("input", () => reviewedTagOverrides.add(index));
     tagsLabel.append(tagsInput);
     const label = document.createElement("label");
     label.textContent = "Short poster summary (optional, up to 400 characters)";
     const textarea = document.createElement("textarea");
     textarea.maxLength = 400;
-    textarea.value = previousSummaries.get(index) ?? episode.llm_suggestion?.summary ?? defaultPosterSummary(episode.description);
+    textarea.value = previousSummaries.get(index) ?? defaultPosterSummary(episode.description);
     const count = document.createElement("div");
     count.className = "review-count";
     count.textContent = `${textarea.value.length}/400`;
-    textarea.addEventListener("input", () => {
-      count.textContent = `${textarea.value.length}/400`;
-      reportSelection();
-    });
+    textarea.addEventListener("input", () => { count.textContent = `${textarea.value.length}/400`; });
     label.append(textarea);
-    suggestButton.addEventListener("click", () => suggestEpisode(index, textarea, tagsInput, count, suggestButton, suggestionFeedback));
-    card.append(title, meta, suggestButton, suggestionFeedback, tagsLabel, label, count);
+    card.append(title, meta, tagsLabel, label, count);
     reviewList.append(card);
     reviewedTags.set(index, tagsInput);
     reviewedSummaries.set(index, textarea);
@@ -767,8 +853,6 @@ function openSelectionReview(){
   paging.hidden = true;
   tray.hidden = true;
   selectionReview.hidden = false;
-  updateSuggestionButtons();
-  reportSelection();
   window.scrollTo(0, 0);
 }
 
@@ -776,35 +860,12 @@ function closeSelectionReview(){
   selectionReview.hidden = true;
   controls.hidden = false;
   list.hidden = false;
-  paging.hidden = false;
   tray.hidden = false;
+  render();
 }
 
-async function downloadSelectedSlots(layout="list"){
-  const chosen = buildSelectedSlots();
-  if(runningInServer){
-    downloadSlotsButton.disabled = true;
-    downloadSingleButton.disabled = true;
-    try{
-      const response = await fetch("/api/generate", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({slots:chosen, layout})
-      });
-      const result = await response.json();
-      if(!response.ok) throw new Error(result.error || "Poster generation failed.");
-      showToast(`${layout === "single" ? "Single-episode" : "List"} poster generated and archived.`);
-      window.parent.postMessage({type:"poster-generated"}, window.location.origin);
-    }catch(error){
-      showToast(error.message);
-    }finally{
-      downloadSlotsButton.disabled = false;
-      downloadSingleButton.disabled = false;
-    }
-    return;
-  }
-
-  const blob = new Blob([JSON.stringify(chosen, null, 2)], {type:"application/json"});
+function downloadSelectedSlots(){
+  const blob = new Blob([JSON.stringify(buildSelectedSlots(), null, 2)], {type:"application/json"});
   const link = document.createElement("a");
   const downloadUrl = URL.createObjectURL(blob);
   link.href = downloadUrl;
@@ -816,6 +877,7 @@ async function downloadSelectedSlots(layout="list"){
 
 function applyChannelMetadata(metadata){
   for(const [index, episode] of EPISODES.entries()){
+    if(episode.not_in_scan) continue;
     const channel = metadata[episode.feed_url] || {};
     if(!reviewedChannelDescriptionOverrides.has(episode.feed_url)){
       episode.channel_description = channel.channel_description || episode.feed_description || "";
@@ -884,30 +946,24 @@ function applyPosterHistory(records){
   render();
 }
 
-const downloadSingleButton = document.getElementById("downloadSingle");
 if(runningInServer){
-  exportButton.hidden = true;
-  downloadSlotsButton.hidden = true;
-  downloadSingleButton.hidden = true;
-  downloadSlotsButton.parentElement.hidden = true;
+  const main = document.querySelector("main");
+  const reportHeight = () => postToStudio({type:"frame-height", height:Math.ceil(main.getBoundingClientRect().bottom + window.scrollY) + 8});
+  new ResizeObserver(reportHeight).observe(main);
   window.addEventListener("message", event => {
     if(event.origin !== location.origin || event.source !== window.parent) return;
-    if(event.data?.type === "open-selection-review") openSelectionReview();
-    if(event.data?.type === "close-selection-review") closeSelectionReview();
-    if(event.data?.type === "sync-selection" && Array.isArray(event.data.urls)) syncSelectionFromUrls(event.data.urls);
-    if(event.data?.type === "poster-history" && Array.isArray(event.data.records)) applyPosterHistory(event.data.records);
-    if(event.data?.type === "channel-metadata" && event.data.metadata && typeof event.data.metadata === "object") applyChannelMetadata(event.data.metadata);
-    if(event.data?.type === "llm-settings" && event.data.settings && typeof event.data.settings === "object") applyLlmSettings(event.data.settings);
+    const data = event.data || {};
+    if(data.type === "draft" && Array.isArray(data.slots)) applyDraft(data.slots);
+    if(data.type === "poster-history" && Array.isArray(data.records)) applyPosterHistory(data.records);
+    if(data.type === "channel-metadata" && data.metadata && typeof data.metadata === "object") applyChannelMetadata(data.metadata);
+    if(data.type === "llm-settings" && data.settings && typeof data.settings === "object") applyLlmSettings(data.settings);
+    if(data.type === "refresh-shortlist") loadShortlist();
   });
 } else {
-  downloadSingleButton.hidden = true;
   exportButton.addEventListener("click", openSelectionReview);
 }
-document.getElementById("downloadSlots").addEventListener("click", () => downloadSelectedSlots("list"));
-document.getElementById("backToEpisodes").addEventListener("click", () => {
-  closeSelectionReview();
-  if(runningInServer) window.parent.postMessage({type:"show-episodes-tab"}, window.location.origin);
-});
+document.getElementById("downloadSlots").addEventListener("click", downloadSelectedSlots);
+document.getElementById("backToEpisodes").addEventListener("click", closeSelectionReview);
 bulkSuggestionBatchSize.addEventListener("input", updateBulkSuggestionControls);
 suggestUnprocessedButton.addEventListener("click", processUnprocessedEpisodes);
 stopBulkSuggestionsButton.addEventListener("click", () => {

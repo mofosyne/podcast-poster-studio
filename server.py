@@ -42,6 +42,9 @@ JOBS = {}
 JOBS_LOCK = threading.Lock()
 CONFIG_LOCK = threading.Lock()
 GENERATION_LOCK = threading.Lock()
+# A preview and an archive request can overlap (e.g. Generate clicked while the
+# preview renders); queue briefly instead of failing the second one.
+GENERATION_WAIT_SECONDS = 60
 LLM_DIAGNOSTICS = []
 LLM_DIAGNOSTICS_LOCK = threading.Lock()
 LLM_SUGGESTIONS_LOCK = threading.Lock()
@@ -613,7 +616,7 @@ def atomic_write_text(path, text):
 
 
 def upgrade_candidate_html(page, candidate_path=None):
-    if 'data-page-version="19"' in page:
+    if 'data-page-version="20"' in page:
         return None
     episode_marker = "const EPISODES = "
     episode_start = page.find(episode_marker)
@@ -706,53 +709,53 @@ def normalize_tags(tags):
     return cleaned
 
 
+def clean_slot(slot, index=1):
+    if not isinstance(slot, dict) or slot.get("type") != "fixed":
+        raise ValueError(f"Selection {index} is not a fixed episode slot.")
+    required = ("show", "episode", "date", "url", "feed_url")
+    if any(not isinstance(slot.get(key), str) or not slot[key].strip() for key in required):
+        raise ValueError(f"Selection {index} is missing show, episode, date, or URL details.")
+    if not slot["url"].startswith(("https://", "http://")):
+        raise ValueError(f"Selection {index} has an invalid episode URL.")
+    if not slot["feed_url"].startswith(("https://", "http://")):
+        raise ValueError(f"Selection {index} has an invalid feed URL.")
+
+    summary = slot.get("summary", "")
+    if not isinstance(summary, str) or len(summary) > 400:
+        raise ValueError(f"Summary {index} must be text of at most 400 characters.")
+    cleaned_slot = {key: slot[key].strip() for key in required}
+    cleaned_slot["type"] = "fixed"
+    if summary.strip():
+        cleaned_slot["summary"] = summary.strip()
+    channel_description = slot.get("channel_description", "")
+    if not isinstance(channel_description, str) or len(channel_description) > MAX_CHANNEL_DESCRIPTION_LENGTH:
+        raise ValueError(f"Channel description {index} must be text of at most {MAX_CHANNEL_DESCRIPTION_LENGTH} characters.")
+    if "channel_description" in slot:
+        cleaned_slot["channel_description"] = channel_description.strip()
+    tags = normalize_tags(slot.get("tags", []))
+    if "tags" in slot:
+        cleaned_slot["tags"] = tags
+    duration = slot.get("duration")
+    if isinstance(duration, str) and duration.strip():
+        cleaned_slot["duration"] = duration.strip()[:40]
+    artwork_path = slot.get("artwork_path")
+    if artwork_path is not None:
+        artwork_dir = (USER_DATA_DIR / "cache" / "artwork").resolve()
+        if not isinstance(artwork_path, str) or not artwork_path.strip():
+            raise ValueError(f"Artwork path {index} must be a relative cached-image path.")
+        candidate = Path(artwork_path)
+        if candidate.is_absolute() or ".." in candidate.parts or candidate.suffix.lower() != ".png":
+            raise ValueError(f"Artwork path {index} must point to a cached PNG image.")
+        resolved_artwork = (BASE_DIR / candidate).resolve()
+        if not resolved_artwork.is_relative_to(artwork_dir) or not resolved_artwork.is_file():
+            raise ValueError(f"Artwork path {index} is outside the local artwork cache or does not exist.")
+        cleaned_slot["artwork_path"] = resolved_artwork.relative_to(BASE_DIR).as_posix()
+    return cleaned_slot
+
+
 def validate_slots(slots, layout="list"):
     validate_layout(layout, slots)
-
-    artwork_dir = (USER_DATA_DIR / "cache" / "artwork").resolve()
-    cleaned = []
-    for index, slot in enumerate(slots, start=1):
-        if not isinstance(slot, dict) or slot.get("type") != "fixed":
-            raise ValueError(f"Selection {index} is not a fixed episode slot.")
-        required = ("show", "episode", "date", "url", "feed_url")
-        if any(not isinstance(slot.get(key), str) or not slot[key].strip() for key in required):
-            raise ValueError(f"Selection {index} is missing show, episode, date, or URL details.")
-        if not slot["url"].startswith(("https://", "http://")):
-            raise ValueError(f"Selection {index} has an invalid episode URL.")
-        if not slot["feed_url"].startswith(("https://", "http://")):
-            raise ValueError(f"Selection {index} has an invalid feed URL.")
-
-        summary = slot.get("summary", "")
-        if not isinstance(summary, str) or len(summary) > 400:
-            raise ValueError(f"Summary {index} must be text of at most 400 characters.")
-        cleaned_slot = {key: slot[key].strip() for key in required}
-        cleaned_slot["type"] = "fixed"
-        if summary.strip():
-            cleaned_slot["summary"] = summary.strip()
-        channel_description = slot.get("channel_description", "")
-        if not isinstance(channel_description, str) or len(channel_description) > MAX_CHANNEL_DESCRIPTION_LENGTH:
-            raise ValueError(f"Channel description {index} must be text of at most {MAX_CHANNEL_DESCRIPTION_LENGTH} characters.")
-        if "channel_description" in slot:
-            cleaned_slot["channel_description"] = channel_description.strip()
-        tags = normalize_tags(slot.get("tags", []))
-        if "tags" in slot:
-            cleaned_slot["tags"] = tags
-        duration = slot.get("duration")
-        if isinstance(duration, str) and duration.strip():
-            cleaned_slot["duration"] = duration.strip()[:40]
-        artwork_path = slot.get("artwork_path")
-        if artwork_path is not None:
-            if not isinstance(artwork_path, str) or not artwork_path.strip():
-                raise ValueError(f"Artwork path {index} must be a relative cached-image path.")
-            candidate = Path(artwork_path)
-            if candidate.is_absolute() or ".." in candidate.parts or candidate.suffix.lower() != ".png":
-                raise ValueError(f"Artwork path {index} must point to a cached PNG image.")
-            resolved_artwork = (BASE_DIR / candidate).resolve()
-            if not resolved_artwork.is_relative_to(artwork_dir) or not resolved_artwork.is_file():
-                raise ValueError(f"Artwork path {index} is outside the local artwork cache or does not exist.")
-            cleaned_slot["artwork_path"] = resolved_artwork.relative_to(BASE_DIR).as_posix()
-        cleaned.append(cleaned_slot)
-    return cleaned
+    return [clean_slot(slot, index) for index, slot in enumerate(slots, start=1)]
 
 
 def save_slots(slots, layout=None, theme=None):
@@ -863,6 +866,240 @@ def promote_shortlist_entry(url):
         atomic_write_json(CONFIG_PATH, config)
         result_shortlist = config["shortlist"]
     return {"slots": cleaned_slots, "shortlist": result_shortlist}
+
+
+def drop_archived_from_shortlist(slots):
+    archived_urls = {slot.get("url") for slot in slots if isinstance(slot, dict) and slot.get("url")}
+    if not archived_urls:
+        return
+    with CONFIG_LOCK:
+        config = load_config()
+        shortlist = get_shortlist(config)
+        remaining = [item for item in shortlist if not isinstance(item, dict) or item.get("url") not in archived_urls]
+        if len(remaining) != len(shortlist):
+            config["shortlist"] = remaining
+            atomic_write_json(CONFIG_PATH, config)
+
+
+# The poster draft is the working selection: config["slots"], edited in place by
+# the browser workflow and read by gen.py. Fixed slots are keyed by episode URL;
+# hand-configured "latest" slots by their feed.
+def slot_key(slot):
+    if not isinstance(slot, dict):
+        return ""
+    if slot.get("type") == "latest":
+        return f"latest:{slot.get('feed_url', '')}"
+    url = slot.get("url")
+    return url if isinstance(url, str) else ""
+
+
+def get_draft_slots(config):
+    slots = config.get("slots", [])
+    if not isinstance(slots, list):
+        return []
+    return [slot for slot in slots if isinstance(slot, dict)]
+
+
+def draft_response(slots):
+    return {"slots": slots, "keys": [slot_key(slot) for slot in slots]}
+
+
+def _draft_position(slots, key):
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("A poster episode key is required.")
+    return next((position for position, slot in enumerate(slots) if slot_key(slot) == key), -1)
+
+
+def _save_draft(config, slots):
+    config["slots"] = slots
+    atomic_write_json(CONFIG_PATH, config)
+    return slots
+
+
+def add_to_draft(slot):
+    try:
+        cleaned = clean_slot(slot)
+    except ValueError:
+        # Cached artwork that has gone missing should not block picking an episode;
+        # the poster falls back to feed artwork or a placeholder.
+        if not isinstance(slot, dict) or "artwork_path" not in slot:
+            raise
+        cleaned = clean_slot({key: value for key, value in slot.items() if key != "artwork_path"})
+    with CONFIG_LOCK:
+        config = load_config()
+        slots = get_draft_slots(config)
+        if _draft_position(slots, cleaned["url"]) >= 0:
+            return slots
+        if len(slots) >= MAX_POSTER_SLOTS:
+            raise ValueError(f"A poster holds at most {MAX_POSTER_SLOTS} episodes. Remove one before adding another.")
+        return _save_draft(config, slots + [cleaned])
+
+
+def remove_from_draft(key):
+    with CONFIG_LOCK:
+        config = load_config()
+        slots = get_draft_slots(config)
+        position = _draft_position(slots, key)
+        if position < 0:
+            return slots
+        del slots[position]
+        return _save_draft(config, slots)
+
+
+def update_draft_slot(key, changes):
+    if not isinstance(changes, dict):
+        raise TypeError("Expected the poster text to update.")
+    with CONFIG_LOCK:
+        config = load_config()
+        slots = get_draft_slots(config)
+        position = _draft_position(slots, key)
+        if position < 0:
+            raise ValueError("That episode is no longer in the poster draft.")
+        slot = dict(slots[position])
+        if slot.get("type") != "fixed":
+            raise ValueError("Only chosen episodes have editable poster text.")
+        if "summary" in changes:
+            summary = changes["summary"]
+            if not isinstance(summary, str) or len(summary) > 400:
+                raise ValueError("The poster summary must be text of at most 400 characters.")
+            if summary.strip():
+                slot["summary"] = summary.strip()
+            else:
+                slot.pop("summary", None)
+        if "tags" in changes:
+            slot["tags"] = normalize_tags(changes["tags"])
+        slots[position] = slot
+        return _save_draft(config, slots)
+
+
+def reorder_draft(keys):
+    if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+        raise TypeError("Expected the poster episodes in their new order.")
+    with CONFIG_LOCK:
+        config = load_config()
+        slots = get_draft_slots(config)
+        by_key = {slot_key(slot): slot for slot in slots}
+        if len(keys) != len(slots) or len(set(keys)) != len(keys) or set(keys) != set(by_key):
+            raise ValueError("The new order must list every poster episode exactly once.")
+        return _save_draft(config, [by_key[key] for key in keys])
+
+
+def clear_draft():
+    with CONFIG_LOCK:
+        config = load_config()
+        return _save_draft(config, [])
+
+
+def save_poster_settings(layout=None, theme=None):
+    with CONFIG_LOCK:
+        config = load_config()
+        if layout is not None:
+            if not isinstance(layout, str) or layout not in {"list", "single"}:
+                raise ValueError('Poster layout must be "list" or "single".')
+            config["poster_layout"] = layout
+        if theme is not None:
+            config["poster_theme"] = validate_poster_theme(theme)
+        atomic_write_json(CONFIG_PATH, config)
+    return {"layout": config.get("poster_layout", "list"), "theme": config.get("poster_theme", "dark")}
+
+
+def draft_matches_record(slots, record, layout, theme):
+    """Whether an archived poster was generated from exactly this draft."""
+    if record.get("layout", "list") != layout or record.get("theme", "dark") != theme:
+        return False
+    archived = record.get("slots")
+    if not isinstance(archived, list) or len(archived) != len(slots):
+        return False
+    for slot, item in zip(slots, archived):
+        if not isinstance(item, dict):
+            return False
+        if slot.get("type") == "latest":
+            if item.get("slot_type") != "latest" or item.get("feed_url") != slot.get("feed_url"):
+                return False
+            continue
+        if item.get("url") != slot.get("url"):
+            return False
+        if (item.get("summary") or "").strip() != (slot.get("summary") or "").strip():
+            return False
+        if "tags" in slot and list(item.get("tags") or []) != list(slot["tags"]):
+            return False
+    return True
+
+
+def get_draft():
+    config = load_config()
+    slots = get_draft_slots(config)
+    layout = config.get("poster_layout", "list")
+    theme = config.get("poster_theme", "dark")
+    try:
+        history = get_history()
+    except (OSError, ValueError):
+        history = []
+    archived = None
+    if slots and history and draft_matches_record(slots, history[0], layout, theme):
+        archived = {key: history[0].get(key) for key in ("manifest", "edition", "title", "generated_at", "printed_at")}
+
+    # Episodes that appeared on another poster, ignoring the archive of this very draft.
+    posted = {}
+    for record in history[1:] if archived else history:
+        for item in record.get("slots") or []:
+            if isinstance(item, dict) and isinstance(item.get("url"), str):
+                posted.setdefault(item["url"], {
+                    "edition": record.get("edition") or record.get("title") or "Earlier poster",
+                    "printed": bool(record.get("printed_at")),
+                })
+
+    episodes_by_url = {}
+    if slots:
+        candidate_path = project_path(config.get("episode_candidates_html", "user-data/episode-candidates.html"))
+        for episode in load_candidate_episodes(candidate_path):
+            if isinstance(episode.get("url"), str):
+                episodes_by_url.setdefault(episode["url"], episode)
+    try:
+        suggestions = load_llm_suggestions() if slots else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        suggestions = {}
+    metadata = config.get("subscription_metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    entries = []
+    for slot in slots:
+        url = slot.get("url") if isinstance(slot.get("url"), str) else ""
+        source = episodes_by_url.get(url, {})
+        channel = metadata.get(slot.get("feed_url"), {})
+        if not isinstance(channel, dict):
+            channel = {}
+        channel_description = channel.get("channel_description") or source.get("feed_description") or ""
+        try:
+            channel_tags = normalize_tags(channel.get("tags", []))
+        except ValueError:
+            channel_tags = []
+        suggestion = suggestions.get(url)
+        if isinstance(suggestion, dict) and isinstance(suggestion.get("summary"), str) and isinstance(suggestion.get("tags"), list):
+            suggestion = {key: suggestion.get(key) for key in ("summary", "tags", "suggestion_version")}
+        else:
+            suggestion = None
+        description = source.get("description")
+        entries.append({
+            "key": slot_key(slot),
+            "slot": slot,
+            "description": description[:12000] if isinstance(description, str) else "",
+            "published_at": source.get("published_at") or "",
+            "artwork_url": cached_artwork_url(slot.get("artwork_path") or source.get("artwork_path")),
+            "channel_description": channel_description[:MAX_CHANNEL_DESCRIPTION_LENGTH] if isinstance(channel_description, str) else "",
+            "channel_tags": channel_tags,
+            "llm_suggestion": suggestion,
+            "previously_posted": posted.get(url),
+        })
+    return {
+        "slots": entries,
+        "max_slots": MAX_POSTER_SLOTS,
+        "layout": layout,
+        "theme": theme,
+        "archived": archived,
+        "llm_suggestion_version": LLM_SUGGESTION_VERSION,
+    }
 
 
 def history_directory(config=None):
@@ -1003,7 +1240,7 @@ def run_scan_job(job_id, command):
 
 
 def generate_poster(slots=None, layout=None, theme=None):
-    if not GENERATION_LOCK.acquire(blocking=False):
+    if not GENERATION_LOCK.acquire(timeout=GENERATION_WAIT_SECONDS):
         raise RuntimeError("A poster is already being generated.")
     try:
         if slots is not None:
@@ -1034,15 +1271,20 @@ def generate_poster(slots=None, layout=None, theme=None):
         output = (result.stdout + result.stderr).strip()
         if result.returncode:
             raise RuntimeError(output or "Poster generation failed.")
+        drop_archived_from_shortlist(get_draft_slots(load_config()))
         records = get_history()
         return {"output": output, "history": records[0] if records else None}
     finally:
         GENERATION_LOCK.release()
 
 
-def preview_poster(slots, layout="list", theme=None):
-    cleaned = validate_slots(slots, layout)
-    if not GENERATION_LOCK.acquire(blocking=False):
+def preview_poster(slots=None, layout="list", theme=None):
+    if slots is None:
+        cleaned = get_draft_slots(load_config())
+        validate_layout(layout, cleaned)
+    else:
+        cleaned = validate_slots(slots, layout)
+    if not GENERATION_LOCK.acquire(timeout=GENERATION_WAIT_SECONDS):
         raise RuntimeError("A poster is already being generated.")
 
     temporary_config = USER_DATA_DIR / f".preview-config-{uuid.uuid4().hex}.json"
@@ -1088,7 +1330,7 @@ def regenerate_history_poster(manifest_name):
     if pdf_path.is_symlink() or pdf_path.resolve().parent != directory_resolved:
         raise ValueError("Archived PDF path is not a regular file in the history folder.")
 
-    if not GENERATION_LOCK.acquire(blocking=False):
+    if not GENERATION_LOCK.acquire(timeout=GENERATION_WAIT_SECONDS):
         raise RuntimeError("A poster is already being generated.")
     try:
         environment = os.environ.copy()
@@ -1456,6 +1698,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json({"shortlist": get_shortlist()})
             except (OSError, json.JSONDecodeError, ValueError) as error:
                 return self._send_error_json(error, 500)
+        if path == "/api/draft":
+            try:
+                return self._send_json(get_draft())
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                return self._send_error_json(error, 500)
         if path in {"/api/poster", "/api/poster/download"}:
             try:
                 output_path = project_path(load_config().get("output_pdf", "user-data/podcast-poster.pdf"))
@@ -1605,6 +1852,36 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json({"shortlist": shortlist})
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
                 return self._send_error_json(error, 400)
+        if path.startswith("/api/draft/"):
+            try:
+                payload = json.loads(self._read_body(MAX_JSON_BYTES))
+                if not isinstance(payload, dict):
+                    raise TypeError("Expected a JSON object.")
+                action = path[len("/api/draft/"):]
+                if action == "add":
+                    slots = add_to_draft(payload.get("slot"))
+                elif action == "remove":
+                    slots = remove_from_draft(payload.get("key"))
+                elif action == "update":
+                    changes = {key: payload[key] for key in ("summary", "tags") if key in payload}
+                    slots = update_draft_slot(payload.get("key"), changes)
+                elif action == "reorder":
+                    slots = reorder_draft(payload.get("keys"))
+                elif action == "clear":
+                    slots = clear_draft()
+                else:
+                    return self._send_error_json("Not found.", 404)
+                return self._send_json(draft_response(slots))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/poster/settings":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict):
+                    raise TypeError("Expected poster layout and theme.")
+                return self._send_json(save_poster_settings(payload.get("layout"), payload.get("theme")))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
         if path == "/api/shortlist/promote":
             try:
                 payload = json.loads(self._read_body(16 * 1024))
@@ -1667,6 +1944,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             "candidates_ready": candidate_path.is_file(),
             "poster_ready": output_path.is_file(),
             "has_slots": bool(config.get("slots")),
+            "draft_count": len(get_draft_slots(config)),
             "poster_title": config.get("poster_title", "Podcast poster"),
             "poster_period": config.get("poster_period", "month"),
             "poster_layout": config.get("poster_layout", "list"),
