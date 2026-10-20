@@ -613,7 +613,7 @@ def atomic_write_text(path, text):
 
 
 def upgrade_candidate_html(page, candidate_path=None):
-    if 'data-page-version="17"' in page:
+    if 'data-page-version="19"' in page:
         return None
     episode_marker = "const EPISODES = "
     episode_start = page.find(episode_marker)
@@ -766,6 +766,103 @@ def save_slots(slots, layout=None, theme=None):
         config["poster_theme"] = selected_theme
         atomic_write_json(CONFIG_PATH, config)
     return cleaned
+
+
+def validate_shortlist_entry(entry):
+    if not isinstance(entry, dict):
+        raise ValueError("Shortlist entry must be an object.")
+    required = ("show", "episode", "date", "url", "feed_url")
+    if any(not isinstance(entry.get(key), str) or not entry[key].strip() for key in required):
+        raise ValueError("Shortlist entry is missing show, episode, date, feed, or URL details.")
+    if not entry["url"].startswith(("https://", "http://")):
+        raise ValueError("Shortlist entry has an invalid episode URL.")
+    if not entry["feed_url"].startswith(("https://", "http://")):
+        raise ValueError("Shortlist entry has an invalid feed URL.")
+
+    summary = entry.get("summary", "")
+    if not isinstance(summary, str) or len(summary) > 400:
+        raise ValueError("Shortlist summary must be text of at most 400 characters.")
+    cleaned = {key: entry[key].strip() for key in required}
+    if summary.strip():
+        cleaned["summary"] = summary.strip()
+    channel_description = entry.get("channel_description", "")
+    if not isinstance(channel_description, str) or len(channel_description) > MAX_CHANNEL_DESCRIPTION_LENGTH:
+        raise ValueError(f"Channel description must be text of at most {MAX_CHANNEL_DESCRIPTION_LENGTH} characters.")
+    if "channel_description" in entry:
+        cleaned["channel_description"] = channel_description.strip()
+    tags = normalize_tags(entry.get("tags", []))
+    if "tags" in entry:
+        cleaned["tags"] = tags
+    duration = entry.get("duration")
+    if isinstance(duration, str) and duration.strip():
+        cleaned["duration"] = duration.strip()[:40]
+    artwork_path = entry.get("artwork_path")
+    if artwork_path is not None:
+        if not isinstance(artwork_path, str) or not artwork_path.strip():
+            raise ValueError("Artwork path must be a relative cached-image path.")
+        candidate = Path(artwork_path)
+        if candidate.is_absolute() or ".." in candidate.parts or candidate.suffix.lower() != ".png":
+            raise ValueError("Artwork path must point to a cached PNG image.")
+        artwork_dir = (USER_DATA_DIR / "cache" / "artwork").resolve()
+        resolved_artwork = (BASE_DIR / candidate).resolve()
+        if not resolved_artwork.is_relative_to(artwork_dir) or not resolved_artwork.is_file():
+            raise ValueError("Artwork path is outside the local artwork cache or does not exist.")
+        cleaned["artwork_path"] = resolved_artwork.relative_to(BASE_DIR).as_posix()
+    return cleaned
+
+
+def get_shortlist(config=None):
+    config = config if config is not None else load_config()
+    shortlist = config.get("shortlist", [])
+    return shortlist if isinstance(shortlist, list) else []
+
+
+def add_to_shortlist(entry):
+    cleaned = validate_shortlist_entry(entry)
+    with CONFIG_LOCK:
+        config = load_config()
+        shortlist = [item for item in get_shortlist(config) if item.get("url") != cleaned["url"]]
+        shortlist.append(cleaned)
+        config["shortlist"] = shortlist
+        atomic_write_json(CONFIG_PATH, config)
+    return shortlist
+
+
+def remove_from_shortlist(url):
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("A shortlist episode URL is required.")
+    with CONFIG_LOCK:
+        config = load_config()
+        shortlist = get_shortlist(config)
+        remaining = [item for item in shortlist if item.get("url") != url]
+        if len(remaining) == len(shortlist):
+            raise ValueError("That episode is not on the shortlist.")
+        config["shortlist"] = remaining
+        atomic_write_json(CONFIG_PATH, config)
+    return remaining
+
+
+def promote_shortlist_entry(url):
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("A shortlist episode URL is required.")
+    with CONFIG_LOCK:
+        config = load_config()
+        shortlist = get_shortlist(config)
+        entry = next((item for item in shortlist if item.get("url") == url), None)
+        if entry is None:
+            raise ValueError("That episode is not on the shortlist.")
+        existing_slots = config.get("slots", [])
+        if not isinstance(existing_slots, list):
+            existing_slots = []
+        if any(slot.get("url") == url for slot in existing_slots):
+            raise ValueError("That episode is already in the poster selection.")
+        candidate_slots = existing_slots + [{**entry, "type": "fixed"}]
+        cleaned_slots = validate_slots(candidate_slots, config.get("poster_layout", "list"))
+        config["slots"] = cleaned_slots
+        config["shortlist"] = [item for item in shortlist if item.get("url") != url]
+        atomic_write_json(CONFIG_PATH, config)
+        result_shortlist = config["shortlist"]
+    return {"slots": cleaned_slots, "shortlist": result_shortlist}
 
 
 def history_directory(config=None):
@@ -973,6 +1070,45 @@ def preview_poster(slots, layout="list", theme=None):
         return {"output": output, "preview": True}
     finally:
         temporary_config.unlink(missing_ok=True)
+        GENERATION_LOCK.release()
+
+
+def regenerate_history_poster(manifest_name):
+    directory = history_directory()
+    directory_resolved = directory.resolve()
+    manifest_path = directory / manifest_name
+    if manifest_path.is_symlink() or manifest_path.resolve().parent != directory_resolved:
+        raise ValueError("Poster history path is not a regular file in the history folder.")
+
+    manifest = read_history_manifest(directory, manifest_name)
+    pdf_name = manifest.get("pdf", "")
+    if not isinstance(pdf_name, str) or Path(pdf_name).name != pdf_name or not pdf_name.startswith("poster-") or not pdf_name.endswith(".pdf"):
+        raise ValueError("Invalid PDF name in poster history.")
+    pdf_path = directory / pdf_name
+    if pdf_path.is_symlink() or pdf_path.resolve().parent != directory_resolved:
+        raise ValueError("Archived PDF path is not a regular file in the history folder.")
+
+    if not GENERATION_LOCK.acquire(blocking=False):
+        raise RuntimeError("A poster is already being generated.")
+    try:
+        environment = os.environ.copy()
+        environment["PODCAST_POSTER_CONFIG"] = str(CONFIG_PATH)
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "gen.py"), "--regenerate-from", str(manifest_path)],
+            cwd=BASE_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            check=False,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode:
+            raise RuntimeError(output or "Poster regeneration failed.")
+        return {"output": output, "history": read_history_manifest(directory, manifest_name)}
+    finally:
         GENERATION_LOCK.release()
 
 
@@ -1315,6 +1451,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json(get_history())
             except (OSError, json.JSONDecodeError, ValueError) as error:
                 return self._send_error_json(error, 500)
+        if path == "/api/shortlist":
+            try:
+                return self._send_json({"shortlist": get_shortlist()})
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                return self._send_error_json(error, 500)
         if path in {"/api/poster", "/api/poster/download"}:
             try:
                 output_path = project_path(load_config().get("output_pdf", "user-data/podcast-poster.pdf"))
@@ -1448,6 +1589,31 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json(result)
             except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired) as error:
                 return self._send_error_json(error, 500)
+        if path == "/api/shortlist":
+            try:
+                payload = json.loads(self._read_body(MAX_JSON_BYTES))
+                shortlist = add_to_shortlist(payload)
+                return self._send_json({"shortlist": shortlist})
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/shortlist/remove":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+                    raise TypeError("Expected a shortlist episode URL.")
+                shortlist = remove_from_shortlist(payload["url"])
+                return self._send_json({"shortlist": shortlist})
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/shortlist/promote":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+                    raise TypeError("Expected a shortlist episode URL.")
+                result = promote_shortlist_entry(payload["url"])
+                return self._send_json(result)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
         if path == "/api/history/printed":
             try:
                 payload = json.loads(self._read_body(16 * 1024))
@@ -1470,6 +1636,15 @@ class LocalHandler(BaseHTTPRequestHandler):
                     result = delete_unprinted_history(payload["manifest"])
                 return self._send_json(result)
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/history/regenerate":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("manifest"), str):
+                    raise TypeError("Expected a poster history manifest name.")
+                result = regenerate_history_poster(payload["manifest"])
+                return self._send_json(result)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError, RuntimeError) as error:
                 return self._send_error_json(error, 400)
         if path == "/api/history/clear":
             try:

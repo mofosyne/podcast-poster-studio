@@ -54,6 +54,8 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
 .subscription-editor summary{cursor:pointer;color:var(--accent)}
 .subscription-editor label{display:block;color:var(--muted);font-size:13px}
 .history-meta{color:var(--muted);font-size:13px}
+.history-preview{grid-column:1/-1}
+.history-preview iframe{width:100%;height:60vh;min-height:420px;border:1px solid var(--line);border-radius:8px;margin-top:8px}
 .badge{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 8px;font-size:12px;white-space:nowrap}
 .badge.printed{color:var(--accent)}
 .badge.pending{color:var(--orange)}
@@ -84,11 +86,12 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
   </div>
   <nav class="tab-nav" role="tablist" aria-label="Poster workflow">
     <button class="tab-button" id="subscriptionsTab" role="tab" aria-selected="true" aria-controls="subscriptionsPanel" data-tab="subscriptions">0 · Subscriptions</button>
-    <button class="tab-button" id="reviewTab" role="tab" aria-selected="false" aria-controls="reviewPanel" data-tab="review">1 · Review episodes <span class="tab-count" id="selectionCount">0</span></button>
-    <button class="tab-button" id="selectionTab" role="tab" aria-selected="false" aria-controls="reviewPanel" data-tab="selection" disabled>2 · Edit selection</button>
-    <button class="tab-button" id="posterTab" role="tab" aria-selected="false" aria-controls="posterPanel" data-tab="poster">3 · Poster</button>
-    <button class="tab-button" id="historyTab" role="tab" aria-selected="false" aria-controls="historyPanel" data-tab="history">4 · History</button>
-    <button class="tab-button" id="settingsTab" role="tab" aria-selected="false" aria-controls="settingsPanel" data-tab="settings">5 · Settings</button>
+    <button class="tab-button" id="reviewTab" role="tab" aria-selected="false" aria-controls="reviewPanel" data-tab="review">1 · Episodes <span class="tab-count" id="selectionCount">0</span></button>
+    <button class="tab-button" id="shortlistTab" role="tab" aria-selected="false" aria-controls="shortlistPanel" data-tab="shortlist">2 · Shortlist <span class="tab-count" id="shortlistCount">0</span></button>
+    <button class="tab-button" id="selectionTab" role="tab" aria-selected="false" aria-controls="reviewPanel" data-tab="selection" disabled>3 · Review</button>
+    <button class="tab-button" id="posterTab" role="tab" aria-selected="false" aria-controls="posterPanel" data-tab="poster">4 · Poster</button>
+    <button class="tab-button" id="historyTab" role="tab" aria-selected="false" aria-controls="historyPanel" data-tab="history">5 · History</button>
+    <button class="tab-button" id="settingsTab" role="tab" aria-selected="false" aria-controls="settingsPanel" data-tab="settings">6 · Settings</button>
   </nav>
 </header>
 <main>
@@ -119,8 +122,13 @@ iframe{width:100%;border:1px solid var(--line);border-radius:5px;background:#111
     <div id="subscriptionList" class="history-list" aria-live="polite"></div>
   </section>
   <section id="reviewPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="reviewTab" hidden>
-    <div class="panel-head"><h2>Review episodes and select up to six</h2><button id="reloadCandidates">Reload list</button></div>
+    <div class="panel-head"><h2>Episodes — select up to six</h2><button id="reloadCandidates">Reload list</button></div>
     <iframe id="candidates" title="Podcast episode candidates" src="/candidates"></iframe>
+  </section>
+  <section id="shortlistPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="shortlistTab" hidden>
+    <div class="panel-head"><h2>Shortlisted episodes</h2><button id="reloadShortlist">Refresh shortlist</button></div>
+    <p class="notice">Episodes you star while reviewing land here. They stay saved until you remove them or use one in the poster.</p>
+    <div id="shortlistList" class="history-list" aria-live="polite"></div>
   </section>
   <section id="posterPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="posterTab" hidden>
     <div class="panel-head">
@@ -191,6 +199,8 @@ const jobOutput = document.getElementById("jobOutput");
 const jobState = document.getElementById("jobState");
 const historyList = document.getElementById("historyList");
 const clearHistoryButton = document.getElementById("clearHistory");
+const shortlistList = document.getElementById("shortlistList");
+const shortlistCount = document.getElementById("shortlistCount");
 const subscriptionList = document.getElementById("subscriptionList");
 const subscriptionsStatus = document.getElementById("subscriptionsStatus");
 const exportSubscriptions = document.getElementById("exportSubscriptions");
@@ -216,6 +226,7 @@ let llmFormInitialized = false;
 const panels = {
   subscriptions: document.getElementById("subscriptionsPanel"),
   review: document.getElementById("reviewPanel"),
+  shortlist: document.getElementById("shortlistPanel"),
   poster: document.getElementById("posterPanel"),
   history: document.getElementById("historyPanel"),
   settings: document.getElementById("settingsPanel")
@@ -390,6 +401,7 @@ function setActiveTab(name, {autoPreview=true}={}){
     candidatesFrame.contentWindow.postMessage({type:"close-selection-review"}, location.origin);
   }
   if(name === "history") refreshHistory().catch(error => { statusBox.textContent = error.message; });
+  if(name === "shortlist") refreshShortlist().catch(error => { statusBox.textContent = error.message; });
   if(name === "subscriptions") refreshSubscriptions().catch(error => { statusBox.textContent = error.message; });
   if(name === "settings") refreshStatus().catch(error => { statusBox.textContent = error.message; });
   if(name === "poster" && autoPreview) refreshPreview();
@@ -408,7 +420,7 @@ function updateSelection(slots){
   if(singleLayoutOption.disabled && posterLayout.value === "single") posterLayout.value = "list";
   generatePosterButton.disabled = selectedSlots.length === 0 && !hasSavedSlots;
   previewHint.textContent = selectedSlots.length
-    ? `Preview updates when you open Poster. Your ${selectedSlots.length} selected episode${selectedSlots.length === 1 ? "" : "s"} will be used; edit summaries in Edit selection.`
+    ? `Preview updates when you open Poster. Your ${selectedSlots.length} selected episode${selectedSlots.length === 1 ? "" : "s"} will be used; edit summaries in Review.`
     : "Choose episodes in Review, then open Poster to refresh the preview. Previewing does not add an entry to history.";
 }
 
@@ -702,6 +714,25 @@ async function refreshHistory(){
     download.href = `/api/history/${encodeURIComponent(record.manifest)}/download`;
     download.className = "download-link";
     download.textContent = "Download PDF";
+    const previewContainer = document.createElement("div");
+    previewContainer.className = "history-preview";
+    previewContainer.hidden = true;
+    const preview = document.createElement("button");
+    preview.textContent = "Preview PDF";
+    preview.addEventListener("click", () => {
+      if(!previewContainer.hidden){
+        previewContainer.hidden = true;
+        previewContainer.replaceChildren();
+        preview.textContent = "Preview PDF";
+        return;
+      }
+      const frame = document.createElement("iframe");
+      frame.title = `Preview of ${record.edition || record.title || "poster"}`;
+      frame.src = `/api/history/${encodeURIComponent(record.manifest)}/pdf?refresh=${Date.now()}`;
+      previewContainer.replaceChildren(frame);
+      previewContainer.hidden = false;
+      preview.textContent = "Hide preview";
+    });
     const toggle = document.createElement("button");
     toggle.textContent = record.printed_at ? "Mark not printed" : "Mark printed";
     toggle.addEventListener("click", async () => {
@@ -714,7 +745,26 @@ async function refreshHistory(){
         await refreshHistory();
       }catch(error){ statusBox.textContent = error.message; }
     });
-    actions.append(printPdf, download, toggle);
+    const regenerate = document.createElement("button");
+    regenerate.textContent = "Regenerate PDF";
+    regenerate.title = "Re-render this archived PDF with the current poster layout, using the same episodes and edition date.";
+    regenerate.addEventListener("click", async () => {
+      regenerate.disabled = true;
+      statusBox.textContent = `Regenerating ${record.edition || record.title || "poster"}…`;
+      try{
+        await requestJson("/api/history/regenerate", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({manifest:record.manifest})
+        });
+        statusBox.textContent = "Archived PDF regenerated.";
+      }catch(error){
+        statusBox.textContent = error.message;
+      }finally{
+        regenerate.disabled = false;
+      }
+    });
+    actions.append(printPdf, download, preview, regenerate, toggle);
     const remove = document.createElement("button");
     remove.className = status === "pending" ? "" : "danger";
     remove.textContent = status === "pending" ? "Delete unprinted" : "Force delete";
@@ -735,8 +785,82 @@ async function refreshHistory(){
       }catch(error){ statusBox.textContent = error.message; }
     });
     actions.append(remove);
-    row.append(title, generated, state, actions);
+    row.append(title, generated, state, actions, previewContainer);
     historyList.append(row);
+  }
+}
+
+async function refreshShortlist(){
+  const data = await requestJson("/api/shortlist");
+  const entries = data.shortlist || [];
+  shortlistCount.textContent = String(entries.length);
+  shortlistList.replaceChildren();
+  if(!entries.length){
+    const empty = document.createElement("p");
+    empty.className = "notice";
+    empty.textContent = "No shortlisted episodes yet. Star episodes in the Episodes tab to save them here.";
+    shortlistList.append(empty);
+    return;
+  }
+  for(const entry of entries){
+    const row = document.createElement("div");
+    row.className = "history-row";
+    const title = document.createElement("strong");
+    title.textContent = `${entry.show} — ${entry.episode}`;
+    const meta = document.createElement("span");
+    meta.className = "history-meta";
+    meta.textContent = entry.date || "";
+    const link = document.createElement("a");
+    link.href = entry.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.className = "download-link";
+    link.textContent = "Open episode";
+    const actions = document.createElement("div");
+    actions.className = "controls";
+    const promote = document.createElement("button");
+    promote.textContent = "Use in poster";
+    promote.title = "Move this episode into the current poster's slots (subject to the 6-slot limit).";
+    promote.addEventListener("click", async () => {
+      promote.disabled = true;
+      try{
+        const result = await requestJson("/api/shortlist/promote", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({url:entry.url})
+        });
+        // The candidates iframe and this page each track their own copy of
+        // the poster selection; keep both in sync with what was just saved
+        // so Review and Poster reflect the promoted episode immediately.
+        updateSelection(result.slots);
+        candidatesFrame.contentWindow?.postMessage(
+          {type:"sync-selection", urls:result.slots.map(slot => slot.url)},
+          location.origin
+        );
+        statusBox.textContent = `Added "${entry.episode}" to the poster selection. See it in Review or Poster.`;
+        await refreshShortlist();
+        await refreshStatus();
+      }catch(error){
+        statusBox.textContent = error.message;
+        promote.disabled = false;
+      }
+    });
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", async () => {
+      try{
+        await requestJson("/api/shortlist/remove", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({url:entry.url})
+        });
+        await refreshShortlist();
+      }catch(error){ statusBox.textContent = error.message; }
+    });
+    actions.append(link, promote, remove);
+    row.append(title, meta, actions);
+    shortlistList.append(row);
   }
 }
 
@@ -841,6 +965,7 @@ document.getElementById("reloadCandidates").addEventListener("click", () => {
   candidatesFrame.src = `/candidates?refresh=${Date.now()}`;
 });
 document.getElementById("reloadHistory").addEventListener("click", refreshHistory);
+document.getElementById("reloadShortlist").addEventListener("click", refreshShortlist);
 clearHistoryButton.addEventListener("click", async () => {
   if(!window.confirm("Permanently delete all archived poster PDFs and their printed/unprinted history records? This clears old-episode warnings. It does not delete subscriptions, episode lists, caches, or the current poster PDF.")) return;
   try{
@@ -962,7 +1087,7 @@ window.addEventListener("message", event => {
   }
 });
 
-Promise.all([refreshStatus({reloadCandidates:true}), refreshHistory(), refreshSubscriptions()]).catch(error => { statusBox.textContent = error.message; });
+Promise.all([refreshStatus({reloadCandidates:true}), refreshHistory(), refreshSubscriptions(), refreshShortlist()]).catch(error => { statusBox.textContent = error.message; });
 </script>
 </body>
 </html>'''

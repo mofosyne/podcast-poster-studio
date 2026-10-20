@@ -24,7 +24,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "user-data" / "config.json"
-MAX_FEED_BYTES = 12 * 1024 * 1024
+MAX_FEED_BYTES = 48 * 1024 * 1024
 MAX_ARTWORK_BYTES = 15 * 1024 * 1024
 LATEST_EPISODE_ARTWORKS = 3
 MAX_DESCRIPTION_CHARS = 400
@@ -75,7 +75,9 @@ input[type=search]{flex:1;min-width:0;background:var(--panel);color:var(--text);
 .batch-size-control input{width:72px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px;font:inherit}
 button{background:var(--accent);color:#10201d;border:0;border-radius:7px;padding:10px 15px;font-weight:700;cursor:pointer}
 button:disabled{opacity:.4;cursor:default}
-.episode{display:grid;grid-template-columns:26px 64px minmax(0,1fr) auto;gap:12px;align-items:start;padding:15px 14px;border-top:1px solid var(--line)}
+.shortlist-button{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-weight:600;font-size:13px;white-space:nowrap}
+.shortlist-button.active{background:rgba(79,209,197,.12);color:var(--accent);border-color:var(--accent)}
+.episode{display:grid;grid-template-columns:26px 64px minmax(0,1fr) auto auto;gap:12px;align-items:start;padding:15px 14px;border-top:1px solid var(--line)}
 .episode:hover{background:#171c19}
 .episode input{accent-color:var(--accent);width:17px;height:17px;margin:4px 0 0}
 .thumbnail,.thumbnail-placeholder{width:64px;height:64px;border-radius:5px;background:var(--panel)}
@@ -120,10 +122,10 @@ a:hover{color:var(--accent);text-decoration:underline}
 #selection{color:var(--muted);font-size:13px}
 .toast{position:fixed;bottom:78px;left:50%;transform:translateX(-50%);background:var(--orange);color:#21180e;padding:8px 15px;border-radius:6px;display:none}
 .toast.show{display:block}
-@media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date{grid-column:3}.controls{flex-wrap:wrap}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
+@media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date,.shortlist-button{grid-column:3}.controls{flex-wrap:wrap}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
 </style>
 </head>
-<body data-page-version="17">
+<body data-page-version="19">
 <main>
   <h1>Podcast episode archive</h1>
   <p class="subtitle">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
@@ -133,7 +135,7 @@ a:hover{color:var(--accent);text-decoration:underline}
   <div id="list"></div>
   <div class="paging" id="paging"><button id="previousPage" type="button">Previous</button><span id="pageStatus"></span><button id="nextPage" type="button">Next</button></div>
   <section id="selectionReview" hidden>
-    <h2>Edit selection</h2>
+    <h2>Review</h2>
     <p class="subtitle">Use optional LLM suggestions for concise summaries and episode tags, then review and edit every draft. Episode details are sent to the configured endpoint only when you request a suggestion.</p>
     <div id="llmSuggestionStatus" class="meta" aria-live="polite">LLM suggestions are unavailable until enabled and configured in Settings.</div>
     <div id="channelReviewList"></div>
@@ -141,7 +143,7 @@ a:hover{color:var(--accent);text-decoration:underline}
     <div class="review-actions"><button id="backToEpisodes" type="button">Back to episodes</button><div><button id="downloadSlots" type="button">Download fixed slots</button> <button id="downloadSingle" type="button" hidden>Generate single-episode poster</button></div></div>
   </section>
 </main>
-<div class="tray" id="tray"><div class="tray-inner"><div><strong id="selection">0 selected</strong><div class="meta">Select episodes, then edit summaries in the Edit selection tab or preview in Poster.</div></div><button id="export" disabled>Edit selection</button></div></div>
+<div class="tray" id="tray"><div class="tray-inner"><div><strong id="selection">0 selected</strong><div class="meta">Select episodes, then edit summaries in the Review tab or preview in Poster.</div></div><button id="export" disabled>Review</button></div></div>
 <div id="toast" class="toast"></div>
 <script>
 const EPISODES = __EPISODES__;
@@ -386,28 +388,92 @@ async function loadLlmSuggestions(){
   }
 }
 
+function buildSlotForIndex(index){
+  const episode = EPISODES[index];
+  const slot = {
+    type:"fixed",
+    show:episode.show,
+    episode:episode.episode,
+    date:episode.date,
+    url:episode.url,
+    feed_url:episode.feed_url
+  };
+  const summaryField = reviewedSummaries.get(index);
+  const summary = (summaryField ? summaryField.value : defaultPosterSummary(episode.description)).trim();
+  if(summary) slot.summary = summary;
+  if(episode.channel_description !== undefined) slot.channel_description = episode.channel_description;
+  const tagsField = reviewedTags.get(index);
+  const tags = parseTags(tagsField ? tagsField.value : (episode.tags || []));
+  if(tags.length || reviewedTagOverrides.has(index) || reviewedChannelTagOverrides.has(episode.feed_url)) slot.tags = tags;
+  if(episode.duration) slot.duration = episode.duration;
+  if(episode.artwork_path) slot.artwork_path = episode.artwork_path;
+  return slot;
+}
+
 function buildSelectedSlots(){
-  return [...selection].map(index => {
-    const episode = EPISODES[index];
-    const slot = {
-      type:"fixed",
-      show:episode.show,
-      episode:episode.episode,
-      date:episode.date,
-      url:episode.url,
-      feed_url:episode.feed_url
-    };
-    const summaryField = reviewedSummaries.get(index);
-    const summary = (summaryField ? summaryField.value : defaultPosterSummary(episode.description)).trim();
-    if(summary) slot.summary = summary;
-    if(episode.channel_description !== undefined) slot.channel_description = episode.channel_description;
-    const tagsField = reviewedTags.get(index);
-    const tags = parseTags(tagsField ? tagsField.value : (episode.tags || []));
-    if(tags.length || reviewedTagOverrides.has(index) || reviewedChannelTagOverrides.has(episode.feed_url)) slot.tags = tags;
-    if(episode.duration) slot.duration = episode.duration;
-    if(episode.artwork_path) slot.artwork_path = episode.artwork_path;
-    return slot;
+  return [...selection].map(buildSlotForIndex);
+}
+
+let shortlistedUrls = new Set();
+
+async function loadShortlist(){
+  if(!runningInServer) return;
+  try{
+    const response = await fetch("/api/shortlist");
+    if(!response.ok) return;
+    const data = await response.json();
+    shortlistedUrls = new Set((data.shortlist || []).map(item => item.url));
+    render();
+  }catch(error){
+    // Shortlist state is best-effort; leave the list unmarked on failure.
+  }
+}
+
+async function toggleShortlist(index, button){
+  const episode = EPISODES[index];
+  const isShortlisted = shortlistedUrls.has(episode.url);
+  button.disabled = true;
+  try{
+    if(isShortlisted){
+      const response = await fetch("/api/shortlist/remove", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({url:episode.url})
+      });
+      const result = await response.json();
+      if(!response.ok) throw new Error(result.error || "Could not remove from shortlist.");
+      shortlistedUrls.delete(episode.url);
+    } else {
+      const response = await fetch("/api/shortlist", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(buildSlotForIndex(index))
+      });
+      const result = await response.json();
+      if(!response.ok) throw new Error(result.error || "Could not add to shortlist.");
+      shortlistedUrls.add(episode.url);
+    }
+  }catch(error){
+    showToast(error.message);
+  }finally{
+    button.disabled = false;
+    render();
+  }
+}
+
+function syncSelectionFromUrls(urls){
+  const urlSet = new Set(urls);
+  let changed = false;
+  EPISODES.forEach((episode, index) => {
+    if(urlSet.has(episode.url) && !selection.has(index)){
+      selection.add(index);
+      changed = true;
+    }
   });
+  // Only refresh checkbox state here; the parent page already has the
+  // authoritative selection (it just told us about it), so don't call
+  // reportSelection() and risk overwriting it with re-derived defaults.
+  if(changed) render();
 }
 
 function reportSelection(){
@@ -548,7 +614,17 @@ function render(){
     const date = document.createElement("div");
     date.className = "date";
     date.textContent = new Date(episode.published_at).toLocaleDateString(undefined, {year:"numeric", month:"short", day:"numeric"});
-    row.append(checkbox, thumbnail, body, date);
+    const shortlistButton = document.createElement("button");
+    shortlistButton.type = "button";
+    const isShortlisted = shortlistedUrls.has(episode.url);
+    shortlistButton.className = isShortlisted ? "shortlist-button active" : "shortlist-button";
+    shortlistButton.textContent = isShortlisted ? "★ Shortlisted" : "☆ Shortlist";
+    shortlistButton.title = isShortlisted
+      ? "Remove from shortlist"
+      : "Save to the shortlist to consider for a later poster";
+    shortlistButton.hidden = !runningInServer;
+    shortlistButton.addEventListener("click", () => toggleShortlist(index, shortlistButton));
+    row.append(checkbox, thumbnail, body, date, shortlistButton);
     list.append(row);
   }
   previousPage.disabled = currentPage === 0;
@@ -818,6 +894,7 @@ if(runningInServer){
     if(event.origin !== location.origin || event.source !== window.parent) return;
     if(event.data?.type === "open-selection-review") openSelectionReview();
     if(event.data?.type === "close-selection-review") closeSelectionReview();
+    if(event.data?.type === "sync-selection" && Array.isArray(event.data.urls)) syncSelectionFromUrls(event.data.urls);
     if(event.data?.type === "poster-history" && Array.isArray(event.data.records)) applyPosterHistory(event.data.records);
     if(event.data?.type === "channel-metadata" && event.data.metadata && typeof event.data.metadata === "object") applyChannelMetadata(event.data.metadata);
     if(event.data?.type === "llm-settings" && event.data.settings && typeof event.data.settings === "object") applyLlmSettings(event.data.settings);
@@ -840,6 +917,7 @@ stopBulkSuggestionsButton.addEventListener("click", () => {
 });
 render();
 if(runningInServer) loadLlmSuggestions();
+if(runningInServer) loadShortlist();
 </script>
 </body>
 </html>
@@ -978,8 +1056,11 @@ def episode_link(item, feed_url):
         if child.text and child.text.strip():
             return http_url(child.text, feed_url)
     for child in item:
-        if local_name(child.tag) == "guid" and child.get("ispermalink", "true").lower() != "false":
+        if local_name(child.tag) == "guid" and child.get("isPermaLink", "true").lower() != "false":
             return http_url(child.text, feed_url)
+    for child in item:
+        if local_name(child.tag) == "enclosure" and child.get("url"):
+            return http_url(child.get("url"), feed_url)
     return None
 
 

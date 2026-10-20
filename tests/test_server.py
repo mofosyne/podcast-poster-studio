@@ -672,7 +672,7 @@ class LocalWorkflowTests(unittest.TestCase):
 
             saved_page = candidate_path.read_text(encoding="utf-8")
 
-        self.assertIn('data-page-version="17"', page)
+        self.assertIn('data-page-version="19"', page)
         self.assertIn("choose up to six for the poster", page)
         self.assertIn("candidate-selection", page)
         self.assertIn('id="bulkSuggestionBatchSize"', page)
@@ -680,7 +680,7 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertIn("channel_artwork_path", page)
         self.assertIn("A saved episode", page)
         self.assertIn("Details including ]; const list = survive the page upgrade.", page)
-        self.assertIn("Edit selection tab", page)
+        self.assertIn("Review tab", page)
         self.assertNotIn("Review selection</button>", page)
         self.assertEqual(saved_page, page)
 
@@ -725,11 +725,12 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertIn("/api/llm/channel-suggest", page)
         self.assertIn("/api/subscriptions/metadata", page)
         self.assertIn("Export OPML", page)
-        self.assertIn("Review episodes", page)
-        self.assertIn("Edit selection", page)
+        self.assertIn("1 · Episodes", page)
+        self.assertIn("2 · Shortlist", page)
+        self.assertIn("3 · Review", page)
         self.assertIn("Poster", page)
         self.assertIn("History", page)
-        self.assertIn("5 · Settings", page)
+        self.assertIn("6 · Settings", page)
         self.assertIn("Disabled by default", page)
         self.assertIn("Test connection", page)
         self.assertIn("Selected and saved the only available model", page)
@@ -873,6 +874,88 @@ class LocalWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.validate_opml(b"<feeds/>")
 
+    def make_shortlist_entry(self, url="https://example.test/episode"):
+        return {
+            "show": "Example Show",
+            "episode": "Example episode",
+            "date": "October 12, 2026",
+            "url": url,
+            "feed_url": "https://example.test/feed.xml",
+            "summary": "A short curated summary.",
+            "tags": ["Environment"],
+        }
+
+    def test_shortlist_http_api_round_trips_add_list_and_remove(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"slots": []}), encoding="utf-8")
+
+            with patch.object(server, "CONFIG_PATH", config_path):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.LocalHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{httpd.server_port}"
+                    entry = self.make_shortlist_entry()
+                    add_request = Request(
+                        base_url + "/api/shortlist",
+                        data=json.dumps(entry).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(add_request) as response:
+                        added = json.loads(response.read())
+
+                    # Re-adding the same URL should replace, not duplicate.
+                    with urlopen(add_request) as response:
+                        readded = json.loads(response.read())
+
+                    with urlopen(base_url + "/api/shortlist") as response:
+                        listed = json.loads(response.read())
+
+                    remove_request = Request(
+                        base_url + "/api/shortlist/remove",
+                        data=json.dumps({"url": entry["url"]}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(remove_request) as response:
+                        removed = json.loads(response.read())
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=2)
+
+        self.assertEqual(len(added["shortlist"]), 1)
+        self.assertEqual(len(readded["shortlist"]), 1)
+        self.assertEqual(listed["shortlist"][0]["show"], "Example Show")
+        self.assertEqual(listed["shortlist"][0]["tags"], ["Environment"])
+        self.assertEqual(removed["shortlist"], [])
+
+    def test_shortlist_promote_moves_entry_into_poster_slots_and_enforces_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"poster_layout": "list", "slots": []}), encoding="utf-8")
+
+            with patch.object(server, "CONFIG_PATH", config_path):
+                entry = self.make_shortlist_entry()
+                server.add_to_shortlist(entry)
+                promoted = server.promote_shortlist_entry(entry["url"])
+
+                with self.assertRaises(ValueError):
+                    server.promote_shortlist_entry(entry["url"])
+
+                for index in range(6):
+                    server.add_to_shortlist(self.make_shortlist_entry(f"https://example.test/overflow-{index}"))
+                    if index < 5:
+                        server.promote_shortlist_entry(f"https://example.test/overflow-{index}")
+                with self.assertRaises(ValueError):
+                    server.promote_shortlist_entry("https://example.test/overflow-5")
+
+        self.assertEqual(promoted["slots"][0]["url"], entry["url"])
+        self.assertEqual(promoted["slots"][0]["type"], "fixed")
+        self.assertEqual(promoted["shortlist"], [])
+
     def test_slot_save_preserves_other_user_config_and_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -948,6 +1031,47 @@ class LocalWorkflowTests(unittest.TestCase):
                     self.assertTrue(result["forced"])
                     self.assertFalse((history_path / f"poster-{name}.json").exists())
                     self.assertFalse((history_path / f"poster-{name}.pdf").exists())
+
+    def test_regenerate_history_poster_overwrites_pdf_in_place_without_new_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history_path = root / "history"
+            history_path.mkdir()
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "poster_history_dir": str(history_path),
+                "feed_cache_dir": str(root / "cache"),
+            }), encoding="utf-8")
+
+            manifest_path = history_path / "poster-regen-test.json"
+            pdf_path = history_path / "poster-regen-test.pdf"
+            pdf_path.write_bytes(b"old pdf bytes")
+            manifest = {
+                "generated_at": "2026-10-01T00:00:00+00:00",
+                "printed_at": None,
+                "title": "EPISODES WORTH LISTENING TO THIS MONTH",
+                "layout": "list",
+                "theme": "dark",
+                "period": "month",
+                "edition": "OCTOBER 2026",
+                "pdf": pdf_path.name,
+                "slots": [self.make_slot()],
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with patch.object(server, "CONFIG_PATH", config_path):
+                result = server.regenerate_history_poster(manifest_path.name)
+
+            saved_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            remaining_files = sorted(path.name for path in history_path.iterdir())
+            regenerated_pdf_bytes = pdf_path.read_bytes()
+
+        self.assertEqual(remaining_files, sorted([pdf_path.name, manifest_path.name]))
+        self.assertTrue(regenerated_pdf_bytes.startswith(b"%PDF"))
+        self.assertEqual(saved_manifest["pdf"], pdf_path.name)
+        self.assertEqual(saved_manifest["edition"], "OCTOBER 2026")
+        self.assertIsNone(saved_manifest["printed_at"])
+        self.assertEqual(result["history"]["manifest"], manifest_path.name)
 
     def test_clear_history_removes_archives_but_preserves_current_pdf_and_other_files(self):
         with tempfile.TemporaryDirectory() as directory:

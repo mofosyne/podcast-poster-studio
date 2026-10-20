@@ -32,6 +32,13 @@ USER_AGENT = "PodcastPoster/1.0 (local poster generator)"
 
 argument_parser = argparse.ArgumentParser(description="Generate a podcast poster PDF.")
 argument_parser.add_argument("--preview", action="store_true", help="Write the preview PDF without archiving it.")
+argument_parser.add_argument(
+    "--regenerate-from",
+    metavar="MANIFEST_JSON",
+    help="Re-render an archived poster history JSON manifest in place, using its frozen slot data "
+    "instead of the live config. Overwrites that entry's archived PDF and does not create a new "
+    "history entry.",
+)
 arguments = argument_parser.parse_args()
 preview_only = arguments.preview
 
@@ -40,21 +47,36 @@ if not CONFIG_PATH.is_file():
 with CONFIG_PATH.open(encoding="utf-8") as f:
     config = json.load(f)
 
-slots = config.get("slots", [])
-if not slots:
-    raise SystemExit("user-data/config.json must define at least one poster slot")
-if len(slots) > MAX_POSTER_SLOTS:
-    raise SystemExit(f"user-data/config.json supports at most {MAX_POSTER_SLOTS} poster slots")
+regenerate_manifest_path = Path(arguments.regenerate_from).resolve() if arguments.regenerate_from else None
 
-poster_layout = config.get("poster_layout", "list")
-if poster_layout not in {"list", "single"}:
-    raise SystemExit('user-data/config.json "poster_layout" must be "list" or "single"')
-if poster_layout == "single" and len(slots) != 1:
-    raise SystemExit('A "single" poster layout requires exactly one configured slot')
+if regenerate_manifest_path:
+    if not regenerate_manifest_path.is_file():
+        raise SystemExit(f"History manifest not found: {regenerate_manifest_path}")
+    with regenerate_manifest_path.open(encoding="utf-8") as f:
+        history_manifest = json.load(f)
 
-poster_theme = config.get("poster_theme", "dark")
-if poster_theme not in {"dark", "ink-saving"}:
-    raise SystemExit('user-data/config.json "poster_theme" must be "dark" or "ink-saving"')
+    slots = history_manifest.get("slots", [])
+    if not slots:
+        raise SystemExit(f"{regenerate_manifest_path} has no archived slots to regenerate.")
+
+    poster_layout = history_manifest.get("layout", "list")
+    poster_theme = history_manifest.get("theme", "dark")
+else:
+    slots = config.get("slots", [])
+    if not slots:
+        raise SystemExit("user-data/config.json must define at least one poster slot")
+    if len(slots) > MAX_POSTER_SLOTS:
+        raise SystemExit(f"user-data/config.json supports at most {MAX_POSTER_SLOTS} poster slots")
+
+    poster_layout = config.get("poster_layout", "list")
+    if poster_layout not in {"list", "single"}:
+        raise SystemExit('user-data/config.json "poster_layout" must be "list" or "single"')
+    if poster_layout == "single" and len(slots) != 1:
+        raise SystemExit('A "single" poster layout requires exactly one configured slot')
+
+    poster_theme = config.get("poster_theme", "dark")
+    if poster_theme not in {"dark", "ink-saving"}:
+        raise SystemExit('user-data/config.json "poster_theme" must be "dark" or "ink-saving"')
 
 THEME_PALETTES = {
     "dark": {
@@ -86,27 +108,32 @@ THEME_PALETTES = {
         "tag_fills": ("#d9ecff", "#f2ddf5", "#dcf1df", "#ffebd5", "#f8dce4", "#e0e7ff", "#f5efcf", "#d5f0eb"),
     },
 }
-THEME_COLORS = THEME_PALETTES[poster_theme]
+THEME_COLORS = THEME_PALETTES.get(poster_theme, THEME_PALETTES["dark"])
 TAG_BUBBLE_HEIGHT = 5 * mm
 TAG_BUBBLE_LINE_STEP = 6 * mm
 TAG_BUBBLE_HORIZONTAL_PADDING = 3.5
 
-poster_period = config.get("poster_period", "month").lower()
-if poster_period not in {"month", "week"}:
-    raise SystemExit('user-data/config.json "poster_period" must be "month" or "week"')
-
-now = datetime.date.today()
-if poster_period == "month":
-    edition_label = now.strftime("%B %Y").upper()
+if regenerate_manifest_path:
+    poster_period = history_manifest.get("period", "month")
+    poster_title = history_manifest.get("title") or "Episodes worth listening to"
+    edition_label = history_manifest.get("edition") or poster_period.upper()
 else:
-    week_start = now - datetime.timedelta(days=now.weekday())
-    edition_label = f"WEEK OF {week_start.strftime('%B')} {week_start.day}, {week_start.year}".upper()
+    poster_period = config.get("poster_period", "month").lower()
+    if poster_period not in {"month", "week"}:
+        raise SystemExit('user-data/config.json "poster_period" must be "month" or "week"')
 
-poster_title = (
-    config.get("single_poster_title", "ONE EPISODE WORTH YOUR TIME")
-    if poster_layout == "single"
-    else config["poster_title"].format(period=poster_period.upper())
-)
+    now = datetime.date.today()
+    if poster_period == "month":
+        edition_label = now.strftime("%B %Y").upper()
+    else:
+        week_start = now - datetime.timedelta(days=now.weekday())
+        edition_label = f"WEEK OF {week_start.strftime('%B')} {week_start.day}, {week_start.year}".upper()
+
+    poster_title = (
+        config.get("single_poster_title", "ONE EPISODE WORTH YOUR TIME")
+        if poster_layout == "single"
+        else config["poster_title"].format(period=poster_period.upper())
+    )
 
 
 def project_path(config_key):
@@ -526,9 +553,28 @@ def wrap_pdf_text(pdf, text, font_name, font_size, max_width, max_lines):
     return lines
 
 
-data = resolve_slots()
+def fit_title_lines(pdf, text, font_name, max_font_size, min_font_size, max_width, max_lines):
+    font_size = max_font_size
+    while True:
+        lines = wrap_pdf_text(pdf, text, font_name, font_size, max_width, max_lines)
+        fits = bool(lines) and not lines[-1].endswith("…")
+        if fits or font_size <= min_font_size:
+            return lines, font_size
+        font_size -= 0.5
 
-output_pdf = project_path("output_pdf")
+
+if regenerate_manifest_path:
+    data = slots
+    archive_pdf_name = history_manifest.get("pdf")
+    if not archive_pdf_name:
+        raise SystemExit(f"{regenerate_manifest_path} has no archived pdf filename to overwrite.")
+    output_pdf = project_path("poster_history_dir") / archive_pdf_name
+    if not output_pdf.is_file():
+        raise SystemExit(f"Archived PDF not found: {output_pdf}")
+else:
+    data = resolve_slots()
+    output_pdf = project_path("output_pdf")
+
 output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
 W, H = A4
@@ -581,44 +627,49 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     text_x = artwork_x + artwork_size + 7 * mm
     text_w = qr_x - 7 * mm - text_x
 
+    date_font_size = 9
+    c.setFont("Helvetica-Oblique", date_font_size)
+    date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
+    while date_width > text_w * 0.4 and date_font_size > 6.5:
+        date_font_size -= 0.25
+        date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
+    show_name_max_width = max(10 * mm, text_w - date_width - 4 * mm)
+
     c.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     c.setFont("Helvetica-Bold", 16)
-    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", 16, text_w)
+    show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", 16, show_name_max_width)
     c.drawString(text_x, text_center + 8 * mm, show_name)
 
+    c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
+    c.setFont("Helvetica-Oblique", date_font_size)
+    c.drawRightString(text_x + text_w, text_center + 8 * mm, item["date"])
+
     summary = str(item.get("summary") or "").strip()
-    title_font_size = 11
+    # Prefer shrinking the font and wrapping to more lines over truncating the
+    # episode title with an ellipsis; the summary below has room to give.
+    title_max_lines = 3 if row_h >= 55 * mm else 2
     c.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
+    title_lines, title_font_size = fit_title_lines(
+        c, item["episode"], "Helvetica", 11, 8, text_w, title_max_lines
+    )
     c.setFont("Helvetica", title_font_size)
-    if row_h >= 45 * mm:
-        title_lines = wrap_pdf_text(c, item["episode"], "Helvetica", title_font_size, text_w, 2)
-    else:
-        title_lines = [fit_pdf_text(c, item["episode"], "Helvetica", title_font_size, text_w)]
     title_y = text_center + 2.5 * mm
     title_leading = 4.5 * mm
     for title_line in title_lines:
         c.drawString(text_x, title_y, title_line)
         title_y -= title_leading
 
-    tag_top = title_y + title_leading - 1.5 * mm
     row_bottom = y_top - row_h
-    date_y = row_bottom + 8.5 * mm
-    max_tag_rows = max(
-        0,
-        min(
-            5,
-            int((tag_top - TAG_BUBBLE_HEIGHT - (date_y + 2.5 * mm)) / TAG_BUBBLE_LINE_STEP) + 1,
-        ),
-    )
-    tags_bottom, _ = draw_tag_bubbles(
-        c, item.get("tags", []), text_x, tag_top, text_w, max_rows=max_tag_rows, font_size=7
-    )
+    url_reserve_y = row_bottom + 5 * mm
+    tag_text = ", ".join(" ".join(str(tag).split("_")) for tag in item.get("tags", []) if str(tag).strip())
+    tags_reserve_y = url_reserve_y + 4 * mm if tag_text else url_reserve_y
+    content_bottom = title_y + title_leading - 1.5 * mm
 
     if summary:
         summary_font_size = 7.5
         summary_leading = 3.2 * mm
-        summary_y = tags_bottom - 2 * mm
-        available_lines = int((summary_y - (date_y + 3 * mm)) / summary_leading) + 1
+        summary_y = content_bottom - 4 * mm
+        available_lines = int((summary_y - (tags_reserve_y + 3 * mm)) / summary_leading) + 1
         max_summary_lines = max(0, min(12, available_lines))
         if max_summary_lines:
             c.setFillColor(colors.HexColor(THEME_COLORS["summary"]))
@@ -629,12 +680,23 @@ for i, item in enumerate(data if poster_layout == "list" else []):
             for summary_line in summary_lines:
                 c.drawString(text_x, summary_y, summary_line)
                 summary_y -= summary_leading
+            content_bottom = summary_y + summary_leading
 
-    c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
-    c.setFont("Helvetica-Oblique", 10)
-    c.drawString(text_x, date_y, item["date"])
+    # Keep the tag line/URL close to the actual content instead of always
+    # sitting at the bottom of the row, which leaves a large gap when a row is
+    # tall (e.g. few episodes on the poster) and the summary is short.
+    if tag_text:
+        tags_y = max(tags_reserve_y, content_bottom - 6 * mm)
+        c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
+        c.setFont("Helvetica", 7.5)
+        c.drawString(text_x, tags_y, fit_pdf_text(c, tag_text, "Helvetica", 7.5, text_w))
+        url_y = tags_y - 4 * mm
+    else:
+        url_y = max(url_reserve_y, content_bottom - 6 * mm)
 
-    use_full_width_url = row_h >= 55 * mm
+    # Full-width URLs run under the artwork column, so only use that width when
+    # the URL has actually dropped below the artwork's bottom edge.
+    use_full_width_url = row_h >= 55 * mm and url_y <= artwork_y - 2 * mm
     url_x = margin if use_full_width_url else text_x
     url_max_width = W - 2 * margin if use_full_width_url else text_w
     url_font_size = 8
@@ -642,7 +704,6 @@ for i, item in enumerate(data if poster_layout == "list" else []):
         url_font_size -= 0.25
     visible_url = fit_pdf_text(c, item["url"], "Helvetica", url_font_size, url_max_width)
     url_width = c.stringWidth(visible_url, "Helvetica", url_font_size)
-    url_y = row_bottom + 5 * mm
     c.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     c.setFont("Helvetica", url_font_size)
     c.drawString(url_x, url_y, visible_url)
@@ -666,7 +727,9 @@ c.drawCentredString(W / 2, margin / 2, edition_label)
 
 c.save()
 print(f"Wrote {output_pdf}")
-if preview_only:
+if regenerate_manifest_path:
+    print(f"Regenerated archived PDF from {regenerate_manifest_path} (history entry unchanged).")
+elif preview_only:
     print("Preview only; not added to poster history.")
 else:
     archive_pdf, archive_json = archive_generation(output_pdf, data)

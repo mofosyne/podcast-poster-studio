@@ -11,5 +11,6 @@
   "single_poster_title": "ONE EPISODE WORTH YOUR TIME",
   "subscription_metadata": {},
   "llm": {"enabled": false},
-  "slots": []
+  "slots": [],
+  "shortlist": []
 }
