@@ -672,15 +672,15 @@ class LocalWorkflowTests(unittest.TestCase):
 
             saved_page = candidate_path.read_text(encoding="utf-8")
 
-        self.assertIn('data-page-version="19"', page)
+        self.assertIn('data-page-version="20"', page)
         self.assertIn("choose up to six for the poster", page)
-        self.assertIn("candidate-selection", page)
+        self.assertIn('type:"draft-add"', page)
         self.assertIn('id="bulkSuggestionBatchSize"', page)
         self.assertIn("user-data/cache/artwork/cover.png", page)
         self.assertIn("channel_artwork_path", page)
         self.assertIn("A saved episode", page)
         self.assertIn("Details including ]; const list = survive the page upgrade.", page)
-        self.assertIn("Review tab", page)
+        self.assertIn("Download fixed slots", page)
         self.assertNotIn("Review selection</button>", page)
         self.assertEqual(saved_page, page)
 
@@ -712,10 +712,29 @@ class LocalWorkflowTests(unittest.TestCase):
                     thread.join(timeout=2)
 
         self.assertIn("Podcast Poster Studio", page)
-        self.assertIn("0 · Subscriptions", page)
+        # Three numbered steps, with library and settings pages beside them.
+        self.assertIn('data-tab="pick"><span class="step-number">1</span>Pick episodes', page)
+        self.assertIn('data-tab="edit"><span class="step-number">2</span>Edit text', page)
+        self.assertIn('data-tab="poster"><span class="step-number">3</span>Poster', page)
+        for secondary in ("subscriptions", "history", "settings"):
+            self.assertIn(f'data-tab="{secondary}"', page)
+        self.assertNotIn("Shortlist</button>", page)
+        # The poster draft is read from and saved to the server, not kept in the page.
+        self.assertIn('requestJson("/api/draft")', page)
+        self.assertIn('"/api/draft/add"', page)
+        self.assertIn('"/api/draft/remove"', page)
+        self.assertIn('"/api/draft/update"', page)
+        self.assertIn('"/api/draft/reorder"', page)
+        self.assertIn('"/api/draft/clear"', page)
+        self.assertIn('postJson("/api/generate-current"', page)
+        self.assertIn('postJson("/api/preview", {layout:posterLayout.value, theme:posterTheme.value})', page)
+        self.assertIn("previewFingerprint !== currentFingerprint()", page)
+        self.assertIn("Start a new poster", page)
+        self.assertIn("Nothing to print yet", page)
+        self.assertIn("Your poster picks were kept.", page)
+        self.assertIn('window.addEventListener("hashchange"', page)
         self.assertIn("Merge (keep existing, add new)", page)
-        self.assertIn("Edit channel description and tags", page)
-        self.assertIn("Process subscription", page)
+        self.assertIn("Edit channel note and tags", page)
         self.assertIn("subscriptionBatchSize", page)
         self.assertIn("processMissingSubscriptions", page)
         self.assertIn("stopSubscriptionBatch", page)
@@ -725,12 +744,6 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertIn("/api/llm/channel-suggest", page)
         self.assertIn("/api/subscriptions/metadata", page)
         self.assertIn("Export OPML", page)
-        self.assertIn("1 · Episodes", page)
-        self.assertIn("2 · Shortlist", page)
-        self.assertIn("3 · Review", page)
-        self.assertIn("Poster", page)
-        self.assertIn("History", page)
-        self.assertIn("6 · Settings", page)
         self.assertIn("Disabled by default", page)
         self.assertIn("Test connection", page)
         self.assertIn("Selected and saved the only available model", page)
@@ -748,13 +761,11 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertIn("Force delete", page)
         self.assertIn("/api/history/clear", page)
         self.assertIn('type:"poster-history"', page)
-        self.assertIn("Refresh preview", page)
-        self.assertIn('if(name === "poster" && autoPreview) refreshPreview();', page)
-        self.assertIn('if(activeTab === "poster") refreshPreview();', page)
         self.assertIn("Print PDF", page)
         self.assertIn("Download PDF", page)
         self.assertIn("opml_name", status)
         self.assertIn("has_slots", status)
+        self.assertEqual(status["draft_count"], 0)
         self.assertFalse(status["llm"]["enabled"])
         self.assertIsInstance(diagnostics["records"], list)
         self.assertEqual(suggestions["version"], server.LLM_SUGGESTION_VERSION)
@@ -970,6 +981,244 @@ class LocalWorkflowTests(unittest.TestCase):
         self.assertEqual(saved["poster_layout"], "single")
         self.assertEqual(saved["poster_theme"], "ink-saving")
         self.assertEqual(saved["slots"][0]["summary"], "A short curated summary.")
+
+    def make_draft_slot(self, url="https://example.test/episode"):
+        return {**self.make_shortlist_entry(url), "type": "fixed"}
+
+    def test_draft_edits_are_saved_immediately_and_keyed_by_episode_url(self):
+        first, second = "https://example.test/first", "https://example.test/second"
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"poster_period": "month", "slots": []}), encoding="utf-8")
+
+            with patch.object(server, "CONFIG_PATH", config_path):
+                server.add_to_draft(self.make_draft_slot(first))
+                # Adding an episode that is already chosen is a no-op, not a duplicate.
+                self.assertEqual(len(server.add_to_draft(self.make_draft_slot(first))), 1)
+                server.add_to_draft(self.make_draft_slot(second))
+                edited = server.update_draft_slot(first, {"summary": "  Edited text.  ", "tags": ["#Climate", "climate", "Policy"]})
+                self.assertEqual(edited[0]["summary"], "Edited text.")
+                self.assertEqual(edited[0]["tags"], ["Climate", "Policy"])
+                cleared = server.update_draft_slot(first, {"summary": "", "tags": []})
+                self.assertNotIn("summary", cleared[0])
+                self.assertEqual(cleared[0]["tags"], [])
+                with self.assertRaises(ValueError):
+                    server.update_draft_slot(first, {"summary": "x" * 401})
+
+                reordered = server.reorder_draft([second, first])
+                self.assertEqual([slot["url"] for slot in reordered], [second, first])
+                for bad_order in ([first], [first, first], [first, "https://example.test/unknown"]):
+                    with self.assertRaises(ValueError):
+                        server.reorder_draft(bad_order)
+
+                self.assertEqual([slot["url"] for slot in server.remove_from_draft(second)], [first])
+                # Removing twice (e.g. a double click) leaves the draft alone.
+                self.assertEqual([slot["url"] for slot in server.remove_from_draft(second)], [first])
+                with self.assertRaises(ValueError):
+                    server.update_draft_slot(second, {"summary": "gone"})
+
+                saved = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["poster_period"], "month")
+                self.assertEqual([slot["url"] for slot in saved["slots"]], [first])
+                self.assertEqual(server.clear_draft(), [])
+
+    def test_draft_accepts_an_episode_whose_cached_artwork_is_gone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user_data = root / "user-data"
+            (user_data / "cache" / "artwork").mkdir(parents=True)
+            config_path = user_data / "config.json"
+            config_path.write_text(json.dumps({"slots": []}), encoding="utf-8")
+            slot = {**self.make_draft_slot(), "artwork_path": "user-data/cache/artwork/deleted.png"}
+
+            with (
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "BASE_DIR", root),
+                patch.object(server, "USER_DATA_DIR", user_data),
+            ):
+                slots = server.add_to_draft(slot)
+                with self.assertRaises(ValueError):
+                    server.add_to_draft({**slot, "url": "not-a-url"})
+
+        self.assertEqual(slots[0]["url"], "https://example.test/episode")
+        self.assertNotIn("artwork_path", slots[0])
+
+    def test_draft_is_capped_at_six_episodes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"slots": []}), encoding="utf-8")
+
+            with patch.object(server, "CONFIG_PATH", config_path):
+                for index in range(server.MAX_POSTER_SLOTS):
+                    server.add_to_draft(self.make_draft_slot(f"https://example.test/{index}"))
+                with self.assertRaises(ValueError):
+                    server.add_to_draft(self.make_draft_slot("https://example.test/seventh"))
+                with self.assertRaises(ValueError):
+                    server.add_to_draft({**self.make_draft_slot(), "type": "latest"})
+
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(saved["slots"]), server.MAX_POSTER_SLOTS)
+
+    def test_draft_keeps_hand_configured_latest_slots(self):
+        latest = {"type": "latest", "show": "Example Show", "feed_url": "https://example.test/feed.xml"}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"slots": [latest, self.make_draft_slot()]}), encoding="utf-8")
+
+            with patch.object(server, "CONFIG_PATH", config_path):
+                with self.assertRaises(ValueError):
+                    server.update_draft_slot("latest:https://example.test/feed.xml", {"summary": "Not editable"})
+                reordered = server.reorder_draft(["https://example.test/episode", "latest:https://example.test/feed.xml"])
+                self.assertEqual(reordered[1], latest)
+                remaining = server.remove_from_draft("latest:https://example.test/feed.xml")
+
+        self.assertEqual([slot["type"] for slot in remaining], ["fixed"])
+
+    def test_draft_http_api_returns_editing_context_and_archive_state(self):
+        url = "https://example.test/episode"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user_data = root / "user-data"
+            history_path = user_data / "history"
+            history_path.mkdir(parents=True)
+            candidate_path = user_data / "episode-candidates.html"
+            candidate_path.write_text(server.render_page([{
+                **self.make_shortlist_entry(url),
+                "description": "The full feed description of this episode.",
+                "feed_description": "Feed-provided channel blurb.",
+                "published_at": "2026-10-12T10:00:00+00:00",
+            }], 1, 1, 0, "today"), encoding="utf-8")
+            suggestions_path = user_data / "llm-suggestions.json"
+            suggestions_path.write_text(json.dumps({url: {
+                "summary": "An AI-drafted summary.", "tags": ["Climate"], "suggestion_version": 1,
+            }}), encoding="utf-8")
+            config_path = user_data / "config.json"
+            config_path.write_text(json.dumps({
+                "episode_candidates_html": str(candidate_path),
+                "poster_history_dir": str(history_path),
+                "poster_layout": "list",
+                "poster_theme": "dark",
+                "subscription_metadata": {"https://example.test/feed.xml": {"channel_description": "", "tags": ["Environment"]}},
+                "slots": [],
+            }), encoding="utf-8")
+            (history_path / "poster-20260901-000000.json").write_text(json.dumps({
+                "generated_at": "2026-09-01T00:00:00+00:00", "printed_at": "2026-09-02T00:00:00+00:00",
+                "edition": "SEPTEMBER 2026", "layout": "list", "theme": "dark",
+                "slots": [{**self.make_draft_slot(url), "slot_type": "fixed"}],
+            }), encoding="utf-8")
+
+            def post(base_url, path, body):
+                request = Request(base_url + path, data=json.dumps(body).encode("utf-8"),
+                                  headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(request) as response:
+                    return json.loads(response.read())
+
+            with (
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "BASE_DIR", root),
+                patch.object(server, "USER_DATA_DIR", user_data),
+                patch.object(server, "LLM_SUGGESTIONS_PATH", suggestions_path),
+            ):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.LocalHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{httpd.server_port}"
+                    added = post(base_url, "/api/draft/add", {"slot": {**self.make_draft_slot(url), "summary": "Edited."}})
+                    with urlopen(base_url + "/api/draft") as response:
+                        draft = json.loads(response.read())
+                    with urlopen(base_url + "/api/status") as response:
+                        status = json.loads(response.read())
+                    # Archive this exact draft; the draft should then report it as archived.
+                    (history_path / "poster-20261001-000000.json").write_text(json.dumps({
+                        "generated_at": "2026-10-01T00:00:00+00:00", "printed_at": None,
+                        "edition": "OCTOBER 2026", "layout": "list", "theme": "dark",
+                        "slots": [{**added["slots"][0], "slot_type": "fixed"}],
+                    }), encoding="utf-8")
+                    with urlopen(base_url + "/api/draft") as response:
+                        archived_draft = json.loads(response.read())
+                    post(base_url, "/api/draft/update", {"key": url, "summary": "Changed after archiving."})
+                    with urlopen(base_url + "/api/draft") as response:
+                        changed_draft = json.loads(response.read())
+                    settings = post(base_url, "/api/poster/settings", {"layout": "single", "theme": "ink-saving"})
+                    bad_request = Request(base_url + "/api/draft/add", data=b'{"slot": {"type": "fixed"}}',
+                                          headers={"Content-Type": "application/json"}, method="POST")
+                    with self.assertRaises(server.HTTPError) as rejected:
+                        urlopen(bad_request)
+                    self.assertEqual(rejected.exception.code, 400)
+                    rejected.exception.close()
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=2)
+
+        self.assertEqual(added["keys"], [url])
+        self.assertEqual(status["draft_count"], 1)
+        entry = draft["slots"][0]
+        self.assertEqual(entry["key"], url)
+        self.assertEqual(entry["slot"]["summary"], "Edited.")
+        self.assertEqual(entry["description"], "The full feed description of this episode.")
+        self.assertEqual(entry["channel_description"], "Feed-provided channel blurb.")
+        self.assertEqual(entry["channel_tags"], ["Environment"])
+        self.assertEqual(entry["llm_suggestion"]["summary"], "An AI-drafted summary.")
+        self.assertEqual(entry["previously_posted"], {"edition": "SEPTEMBER 2026", "printed": True})
+        self.assertIsNone(draft["archived"])
+        self.assertEqual(archived_draft["archived"]["edition"], "OCTOBER 2026")
+        # Its own archive is not a "previously posted" warning; the older poster still is.
+        self.assertEqual(archived_draft["slots"][0]["previously_posted"]["edition"], "SEPTEMBER 2026")
+        self.assertIsNone(changed_draft["archived"])
+        self.assertEqual(settings, {"layout": "single", "theme": "ink-saving"})
+
+    def test_preview_without_slots_renders_the_saved_draft(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user_data = root / "user-data"
+            user_data.mkdir()
+            config_path = user_data / "config.json"
+            config = {"poster_layout": "list", "poster_theme": "dark", "slots": [self.make_draft_slot()]}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            preview_configs = []
+
+            def fake_run(command, **kwargs):
+                preview_configs.append(json.loads(Path(kwargs["env"]["PODCAST_POSTER_CONFIG"]).read_text(encoding="utf-8")))
+                return server.subprocess.CompletedProcess(command, 0, "Preview generated", "")
+
+            with (
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "USER_DATA_DIR", user_data),
+                patch.object(server.subprocess, "run", side_effect=fake_run),
+            ):
+                server.preview_poster(None, "list", "ink-saving")
+                server.clear_draft()
+                with self.assertRaises(ValueError):
+                    server.preview_poster(None, "list", "dark")
+
+        self.assertEqual(preview_configs[0]["slots"][0]["url"], "https://example.test/episode")
+        self.assertEqual(preview_configs[0]["poster_theme"], "ink-saving")
+        self.assertEqual(len(preview_configs), 1)
+
+    def test_generating_a_poster_removes_its_episodes_from_the_shortlist(self):
+        kept = "https://example.test/kept"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "poster_history_dir": str(root / "history"),
+                "poster_layout": "list",
+                "slots": [self.make_draft_slot()],
+                "shortlist": [self.make_shortlist_entry(), self.make_shortlist_entry(kept)],
+            }), encoding="utf-8")
+
+            with (
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server.subprocess, "run", return_value=server.subprocess.CompletedProcess([], 0, "ok", "")),
+            ):
+                server.generate_poster(None, "list", "dark")
+
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([item["url"] for item in saved["shortlist"]], [kept])
+        self.assertEqual(len(saved["slots"]), 1)
 
     def test_printed_state_is_persisted_in_the_history_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

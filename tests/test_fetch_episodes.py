@@ -200,8 +200,9 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("\\u003c/script>", page)
         self.assertIn("Earlier poster", page)
         self.assertIn("1 previously posted", page)
-        self.assertIn('data-page-version="19"', page)
+        self.assertIn('data-page-version="20"', page)
         self.assertIn("up to 400 characters", page)
+        # Standalone (file) mode keeps its own review step and fixed-slot export.
         self.assertIn("Episode tags (edit these suggestions for this episode only)", page)
         self.assertIn("Common channel tags (suggestions preloaded for episode tags)", page)
         self.assertIn("Channel description / editorial note (up to 400 characters)", page)
@@ -210,8 +211,7 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("reviewedChannelDescriptionOverrides.add(feedUrl)", page)
         self.assertIn("reviewedChannelTagOverrides.add(feedUrl)", page)
         self.assertIn("<h2>Review</h2>", page)
-        self.assertIn("Suggest summary + tags", page)
-        self.assertIn("LLM suggestions unavailable:", page)
+        self.assertIn("Download fixed slots", page)
         self.assertIn("details.open = false", page)
         self.assertIn("See Settings → Recent LLM diagnostics", page)
         self.assertIn("/api/llm/suggest", page)
@@ -235,10 +235,18 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("/api/llm/suggestions", page)
         self.assertIn("description.textContent = episode.description", page)
         self.assertIn("slot.summary = summary", page)
-        self.assertIn("candidate-selection", page)
         self.assertIn("poster-history", page)
         self.assertIn("function applyPosterHistory(records)", page)
-        self.assertIn("reportSelection();", page)
+        # Embedded in the studio, ticks become draft changes the server saves,
+        # and the server's draft is applied back to the checkboxes.
+        self.assertIn('{type:"draft-add", slot:draftSlotForIndex(index)}', page)
+        self.assertIn('{type:"draft-remove", key:episode.url}', page)
+        self.assertIn('data.type === "draft"', page)
+        self.assertIn("window.parent.location.origin === window.location.origin", page)
+        self.assertNotIn("candidate-selection", page)
+        self.assertIn('data-filter="shortlist"', page)
+        self.assertIn('data-filter="selected"', page)
+        self.assertIn("function addOrphanEpisode(entry)", page)
 
 
 if __name__ == "__main__":
