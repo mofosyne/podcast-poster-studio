@@ -409,45 +409,57 @@ def fit_pdf_text(pdf, text, font_name, font_size, max_width):
     return text.rstrip() + suffix
 
 
-def draw_tag_bubbles(pdf, tags, x, top_y, max_width, max_rows, font_size=7):
+def layout_tag_rows(pdf, tags, max_width, max_rows, font_size=7):
+    """Split tags into rows of (label, width) bubbles that fit max_width."""
     cleaned_tags = ["#" + "_".join(str(tag).split()) for tag in tags if str(tag).strip()]
-    if not cleaned_tags or max_width <= 0 or max_rows <= 0:
+    rows = []
+    if max_width <= 0 or max_rows <= 0:
+        return rows
+    pad_x = TAG_BUBBLE_HORIZONTAL_PADDING
+    gap_x = 2 * mm
+    row_width = 0
+    for tag in cleaned_tags:
+        tag_width = pdf.stringWidth(tag, "Helvetica-Bold", font_size) + 2 * pad_x
+        if tag_width > max_width:
+            tag = fit_pdf_text(pdf, tag, "Helvetica-Bold", font_size, max_width - 2 * pad_x)
+            tag_width = pdf.stringWidth(tag, "Helvetica-Bold", font_size) + 2 * pad_x
+        if not rows or row_width + gap_x + tag_width > max_width:
+            if len(rows) >= max_rows:
+                break
+            rows.append([])
+            row_width = -gap_x
+        rows[-1].append((tag, tag_width))
+        row_width += gap_x + tag_width
+    return rows
+
+
+def draw_tag_bubbles(pdf, tags, x, top_y, max_width, max_rows, font_size=7, align="left"):
+    rows = layout_tag_rows(pdf, tags, max_width, max_rows, font_size)
+    if not rows:
         return top_y, 0
 
     pad_x = TAG_BUBBLE_HORIZONTAL_PADDING
     bubble_h = TAG_BUBBLE_HEIGHT
     gap_x = 2 * mm
     line_step = TAG_BUBBLE_LINE_STEP
-    cursor_x = x
-    row = 0
     palette = THEME_COLORS["tag_fills"]
     pdf.setFont("Helvetica-Bold", font_size)
 
-    for tag in cleaned_tags:
-        digest = hashlib.sha256(tag.casefold().encode("utf-8")).digest()
-        fill = colors.HexColor(palette[int.from_bytes(digest[:2], "big") % len(palette)])
-        tag_width = pdf.stringWidth(tag, "Helvetica-Bold", font_size) + 2 * pad_x
-        if tag_width > max_width:
-            tag = fit_pdf_text(pdf, tag, "Helvetica-Bold", font_size, max_width - 2 * pad_x)
-            tag_width = pdf.stringWidth(tag, "Helvetica-Bold", font_size) + 2 * pad_x
-        if cursor_x > x and cursor_x + tag_width > x + max_width:
-            row += 1
-            if row >= max_rows:
-                break
-            cursor_x = x
-        if cursor_x + tag_width > x + max_width:
-            break
+    for row_index, row in enumerate(rows):
+        row_width = sum(width for _, width in row) + gap_x * (len(row) - 1)
+        cursor_x = x + (max_width - row_width) / 2 if align == "center" else x
+        bubble_y = top_y - row_index * line_step - bubble_h
+        for tag, tag_width in row:
+            digest = hashlib.sha256(tag.casefold().encode("utf-8")).digest()
+            fill = colors.HexColor(palette[int.from_bytes(digest[:2], "big") % len(palette)])
+            pdf.setFillColor(fill)
+            pdf.roundRect(cursor_x, bubble_y, tag_width, bubble_h, bubble_h / 2, fill=1, stroke=0)
+            pdf.setFillColor(colors.HexColor(THEME_COLORS["tag_text"]))
+            text_y = bubble_y + (bubble_h - font_size) / 2 + 0.5
+            pdf.drawString(cursor_x + pad_x, text_y, tag)
+            cursor_x += tag_width + gap_x
 
-        bubble_y = top_y - row * line_step - bubble_h
-        pdf.setFillColor(fill)
-        pdf.roundRect(cursor_x, bubble_y, tag_width, bubble_h, bubble_h / 2, fill=1, stroke=0)
-        pdf.setFillColor(colors.HexColor(THEME_COLORS["tag_text"]))
-        text_y = bubble_y + (bubble_h - font_size) / 2 + 0.5
-        pdf.drawString(cursor_x + pad_x, text_y, tag)
-        cursor_x += tag_width + gap_x
-
-    rows = min(row + 1, max_rows)
-    return top_y - rows * line_step, rows
+    return top_y - len(rows) * line_step, len(rows)
 
 
 def draw_single_poster(pdf, item):
@@ -468,14 +480,49 @@ def draw_single_poster(pdf, item):
     pdf.drawCentredString(
         W / 2, H - margin - 25 * mm, "Scan to listen, or search for it in your preferred podcast app"
     )
-    tags_top = H - margin - 29 * mm
-    _, tag_rows = draw_tag_bubbles(
-        pdf, item.get("tags", []), margin, tags_top, W - 2 * margin, max_rows=2, font_size=7
-    )
+    header_bottom = H - margin - 30 * mm
+    content_width = W - 2 * margin
 
-    artwork_size = 96 * mm
+    # Footer: the QR code centred under the episode, with its URL beneath.
+    qr_size = 50 * mm
+    url_y = margin + 3 * mm
+    qr_y = url_y + 5 * mm
+    footer_top = qr_y + qr_size
+
+    # Measure the text first; the artwork then takes whatever height is left,
+    # and the whole group is centred between the header and the QR code.
+    title_lines, title_font_size = fit_title_lines(
+        pdf, item["episode"], "Helvetica-Bold", 22, 15, content_width, 3
+    )
+    title_leading = title_font_size * 1.2
+    tag_rows = layout_tag_rows(pdf, item.get("tags", []), content_width, 2, font_size=8)
+    summary = str(item.get("summary") or "").strip()
+    summary_font_size = 11
+    summary_leading = summary_font_size * 1.35
+    episode_date = item.get("date", "")
+    art_gap = 9 * mm
+    available = header_bottom - footer_top - 12 * mm
+    min_artwork, max_artwork = 60 * mm, 120 * mm
+    summary_max_lines = 10
+    while True:
+        summary_lines = wrap_pdf_text(
+            pdf, summary, "Helvetica", summary_font_size, content_width - 16 * mm, summary_max_lines
+        ) if summary else []
+        text_height = (
+            title_leading * len(title_lines)
+            + (len(tag_rows) * TAG_BUBBLE_LINE_STEP + 3 * mm if tag_rows else 0)
+            + (summary_leading * len(summary_lines) + 3 * mm if summary_lines else 0)
+            + (6 * mm if episode_date else 0)
+        )
+        artwork_size = min(max_artwork, available - art_gap - text_height)
+        if artwork_size >= min_artwork or summary_max_lines <= 3:
+            artwork_size = max(artwork_size, min_artwork)
+            break
+        summary_max_lines -= 1
+
+    group_height = artwork_size + art_gap + text_height
+    artwork_top = header_bottom - 6 * mm - max(0, available - group_height) / 2
     artwork_x = (W - artwork_size) / 2
-    artwork_top = H - margin - (38 + tag_rows * TAG_BUBBLE_LINE_STEP / mm) * mm
     artwork_y = artwork_top - artwork_size
     artwork_path = artwork_for(item)
     if artwork_path:
@@ -483,62 +530,63 @@ def draw_single_poster(pdf, item):
     else:
         draw_placeholder_artwork(pdf, artwork_x, artwork_y, artwork_size, item["show"])
 
-    content_width = W - 2 * margin
-    title_lines = wrap_pdf_text(pdf, item["episode"], "Helvetica-Bold", 20, content_width, 3)
-    title_y = artwork_y - 12 * mm
+    cursor_y = artwork_y - art_gap
     pdf.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
-    pdf.setFont("Helvetica-Bold", 20)
+    pdf.setFont("Helvetica-Bold", title_font_size)
     for line in title_lines:
-        pdf.drawCentredString(W / 2, title_y, line)
-        title_y -= 8 * mm
-
-    summary = str(item.get("summary") or "").strip()
-    if summary:
-        summary_lines = wrap_pdf_text(pdf, summary, "Helvetica", 10, content_width - 14 * mm, 8)
+        cursor_y -= title_font_size * 0.2
+        pdf.drawCentredString(W / 2, cursor_y, line)
+        cursor_y -= title_leading - title_font_size * 0.2
+    if tag_rows:
+        cursor_y -= 2 * mm
+        cursor_y, _ = draw_tag_bubbles(
+            pdf, item.get("tags", []), margin, cursor_y, content_width, max_rows=2, font_size=8, align="center"
+        )
+        cursor_y -= 1 * mm
+    if summary_lines:
+        cursor_y -= 3 * mm + summary_font_size * 0.4
         pdf.setFillColor(colors.HexColor(THEME_COLORS["summary"]))
-        pdf.setFont("Helvetica", 10)
-        summary_y = title_y - 2 * mm
+        pdf.setFont("Helvetica", summary_font_size)
         for line in summary_lines:
-            pdf.drawCentredString(W / 2, summary_y, line)
-            summary_y -= 4.5 * mm
-        detail_y = summary_y - 3 * mm
-    else:
-        detail_y = title_y - 3 * mm
-
-    episode_date = item.get("date", "")
+            pdf.drawCentredString(W / 2, cursor_y, line)
+            cursor_y -= summary_leading
     if episode_date:
         pdf.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
         pdf.setFont("Helvetica", 10)
-        pdf.drawCentredString(W / 2, detail_y, episode_date)
+        pdf.drawCentredString(W / 2, cursor_y - 2 * mm, episode_date)
 
-    qr_size = 60 * mm
     qr_image = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
     qr_image.save(qr_buffer, kind="PNG")
     qr_buffer.seek(0)
-    qr_x = W - margin - qr_size
-    qr_y = margin + 7 * mm
-    pdf.drawImage(ImageReader(qr_buffer), qr_x, qr_y, width=qr_size, height=qr_size)
+    pdf.drawImage(ImageReader(qr_buffer), (W - qr_size) / 2, qr_y, width=qr_size, height=qr_size)
 
     url_font_size = 8
-    url_width = min(pdf.stringWidth(item["url"], "Helvetica", url_font_size), W - 2 * margin - qr_size - 8 * mm)
-    while pdf.stringWidth(item["url"], "Helvetica", url_font_size) > W - 2 * margin - qr_size - 8 * mm and url_font_size > 6:
+    while pdf.stringWidth(item["url"], "Helvetica", url_font_size) > content_width and url_font_size > 6:
         url_font_size -= 0.25
-    url_y = qr_y + qr_size / 2
+    visible_url = fit_pdf_text(pdf, item["url"], "Helvetica", url_font_size, content_width)
+    url_width = pdf.stringWidth(visible_url, "Helvetica", url_font_size)
     pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     pdf.setFont("Helvetica", url_font_size)
-    pdf.drawString(margin, url_y, fit_pdf_text(pdf, item["url"], "Helvetica", url_font_size, W - 2 * margin - qr_size - 8 * mm))
-    pdf.linkURL(item["url"], (margin, url_y - 0.6 * mm, margin + url_width, url_y + 2.4 * mm), relative=0, thickness=0)
+    pdf.drawCentredString(W / 2, url_y, visible_url)
+    pdf.linkURL(
+        item["url"],
+        ((W - url_width) / 2, url_y - 0.6 * mm, (W + url_width) / 2, url_y + 2.4 * mm),
+        relative=0,
+        thickness=0,
+    )
 
 
 def wrap_pdf_text(pdf, text, font_name, font_size, max_width, max_lines):
+    """Wrap text into at most max_lines lines; max_width may be a function of the line index."""
+    width_for = max_width if callable(max_width) else (lambda index: max_width)
     words = text.split()
     lines = []
     line = ""
     truncated = False
     for word in words:
         candidate = (line + " " + word).strip()
-        if pdf.stringWidth(candidate, font_name, font_size) <= max_width:
+        if pdf.stringWidth(candidate, font_name, font_size) <= width_for(len(lines)):
             line = candidate
         elif line:
             lines.append(line)
@@ -547,14 +595,14 @@ def wrap_pdf_text(pdf, text, font_name, font_size, max_width, max_lines):
                 truncated = True
                 break
         else:
-            lines.append(fit_pdf_text(pdf, word, font_name, font_size, max_width))
+            lines.append(fit_pdf_text(pdf, word, font_name, font_size, width_for(len(lines))))
             if len(lines) == max_lines:
                 truncated = True
                 break
     if line and len(lines) < max_lines:
         lines.append(line)
     if truncated and lines:
-        lines[-1] = fit_pdf_text(pdf, lines[-1] + "…", font_name, font_size, max_width)
+        lines[-1] = fit_pdf_text(pdf, lines[-1] + "…", font_name, font_size, width_for(len(lines) - 1))
     return lines
 
 
@@ -608,64 +656,87 @@ top = H - margin - 28 * mm
 for i, item in enumerate(data if poster_layout == "list" else []):
     y_top = top - i * row_h
     y_center = y_top - row_h / 2
-    text_rise = min(10 * mm, max(0, (row_h - 35 * mm) * 0.12))
-    text_center = y_center + text_rise
-    artwork_path = artwork_for(item)
-    artwork_size = min(row_h * 0.76, 56 * mm)
-    artwork_x = margin
-    artwork_y = y_center - artwork_size / 2
+    # Fewer episodes means taller rows: 0 at six rows, 1 at two or fewer. Taller
+    # rows get bigger type and more summary lines. Rows tall enough to stack the
+    # QR code under the artwork do so, giving the text the full page width;
+    # otherwise text runs full width only above the QR code on the right.
+    roominess = min(1, max(0, (row_h - 40 * mm) / (75 * mm)))
+    qr_size = min(row_h * 0.8, 48 * mm)
+    stacked = row_h >= 100 * mm
+    if stacked:
+        artwork_size = min(80 * mm, row_h - qr_size - 16 * mm)
+        column_w = max(artwork_size, qr_size)
+        group_top = y_center + (artwork_size + 5 * mm + qr_size) / 2
+        artwork_x = margin + (column_w - artwork_size) / 2
+        artwork_y = group_top - artwork_size
+        qr_x = margin + (column_w - qr_size) / 2
+        qr_y = artwork_y - 5 * mm - qr_size
+        text_x = margin + column_w + 8 * mm
+    else:
+        artwork_size = min(row_h * 0.76, 56 * mm + roominess * 12 * mm)
+        artwork_x = margin
+        artwork_y = y_center - artwork_size / 2
+        qr_x = W - margin - qr_size
+        qr_drop = min(22 * mm, max(0, (row_h - 30 * mm) * 0.22))
+        qr_y = y_center - qr_size / 2 - qr_drop
+        text_x = artwork_x + artwork_size + 7 * mm
 
+    artwork_path = artwork_for(item)
     if artwork_path:
         c.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size, mask="auto")
     else:
         draw_placeholder_artwork(c, artwork_x, artwork_y, artwork_size, item["show"])
 
-    qr_size = min(row_h * 0.8, 48 * mm)
     qr_img = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
     qr_img.save(qr_buffer, kind="PNG")
     qr_buffer.seek(0)
-
-    qr_x = W - margin - qr_size
-    qr_drop = min(22 * mm, max(0, (row_h - 30 * mm) * 0.22))
-    qr_y = y_center - qr_size / 2 - qr_drop
     c.drawImage(ImageReader(qr_buffer), qr_x, qr_y, width=qr_size, height=qr_size)
 
-    text_x = artwork_x + artwork_size + 7 * mm
-    text_w = qr_x - 7 * mm - text_x
+    # In stacked rows nothing sits to the right of the text.
+    qr_clear_y = float("-inf") if stacked else qr_y + qr_size + 3 * mm
 
-    date_font_size = 9
+    def width_at(baseline, font_size, x=text_x):
+        """Usable line width at a baseline: full width once clear of the QR code."""
+        right = W - margin if baseline - font_size * 0.3 > qr_clear_y else qr_x - 7 * mm
+        return right - x
+
+    show_font_size = 16 + roominess * 4
+    show_y = artwork_y + artwork_size - show_font_size * 0.75
+    line_w = width_at(show_y, show_font_size)
+    date_font_size = 9 + roominess
     c.setFont("Helvetica-Oblique", date_font_size)
     date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
-    while date_width > text_w * 0.4 and date_font_size > 6.5:
+    while date_width > line_w * 0.4 and date_font_size > 6.5:
         date_font_size -= 0.25
         date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
-    show_name_max_width = max(10 * mm, text_w - date_width - 4 * mm)
+    show_name_max_width = max(10 * mm, line_w - date_width - 4 * mm)
 
     # Shrink long show names before falling back to an ellipsis.
-    show_font_size = 16
     while c.stringWidth(item["show"], "Helvetica-Bold", show_font_size) > show_name_max_width and show_font_size > 11:
         show_font_size -= 0.5
     c.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
     c.setFont("Helvetica-Bold", show_font_size)
     show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", show_font_size, show_name_max_width)
-    c.drawString(text_x, text_center + 8 * mm, show_name)
+    c.drawString(text_x, show_y, show_name)
 
     c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
     c.setFont("Helvetica-Oblique", date_font_size)
-    c.drawRightString(text_x + text_w, text_center + 8 * mm, item["date"])
+    c.drawRightString(text_x + line_w, show_y, item["date"])
 
     summary = str(item.get("summary") or "").strip()
     # Prefer shrinking the font and wrapping to more lines over truncating the
     # episode title with an ellipsis; the summary below has room to give.
     title_max_lines = 3 if row_h >= 55 * mm else 2
+    title_max_font_size = 11 + roominess * 5
+    title_y = show_y - 5.5 * mm - roominess * 2 * mm
+    title_w = width_at(title_y - (title_max_lines - 1) * title_max_font_size * 1.18, title_max_font_size)
     c.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
     title_lines, title_font_size = fit_title_lines(
-        c, item["episode"], "Helvetica", 11, 8, text_w, title_max_lines
+        c, item["episode"], "Helvetica", title_max_font_size, 8, title_w, title_max_lines
     )
     c.setFont("Helvetica", title_font_size)
-    title_y = text_center + 2.5 * mm
-    title_leading = 4.5 * mm
+    title_leading = title_font_size * 1.18
     for title_line in title_lines:
         c.drawString(text_x, title_y, title_line)
         title_y -= title_leading
@@ -673,21 +744,30 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     row_bottom = y_top - row_h
     url_reserve_y = row_bottom + 5 * mm
     tag_text = ", ".join(" ".join(str(tag).split("_")) for tag in item.get("tags", []) if str(tag).strip())
+    tag_font_size = 7.5 + roominess * 1.5
     tags_reserve_y = url_reserve_y + 4 * mm if tag_text else url_reserve_y
     content_bottom = title_y + title_leading - 1.5 * mm
 
     if summary:
-        summary_font_size = 7.5
-        summary_leading = 3.2 * mm
-        summary_y = content_bottom - 4 * mm
-        available_lines = int((summary_y - (tags_reserve_y + 3 * mm)) / summary_leading) + 1
-        max_summary_lines = max(0, min(12, available_lines))
-        if max_summary_lines:
+        summary_y = content_bottom - 4 * mm - roominess * 1.5 * mm
+        # Start large in roomy rows, but step down towards the six-row size
+        # before cutting the summary short with an ellipsis.
+        summary_font_size = 7.5 + roominess * 3
+        while True:
+            summary_leading = summary_font_size * 1.22
+            available_lines = int((summary_y - (tags_reserve_y + 3 * mm)) / summary_leading) + 1
+            max_summary_lines = max(0, min(int(12 + roominess * 18), available_lines))
+            summary_lines = wrap_pdf_text(
+                c, summary, "Helvetica", summary_font_size,
+                lambda index: width_at(summary_y - index * summary_leading, summary_font_size),
+                max_summary_lines,
+            ) if max_summary_lines else []
+            if (summary_lines and not summary_lines[-1].endswith("…")) or summary_font_size <= 7.5:
+                break
+            summary_font_size = max(7.5, summary_font_size - 0.5)
+        if summary_lines:
             c.setFillColor(colors.HexColor(THEME_COLORS["summary"]))
             c.setFont("Helvetica", summary_font_size)
-            summary_lines = wrap_pdf_text(
-                c, summary, "Helvetica", summary_font_size, text_w, max_summary_lines
-            )
             for summary_line in summary_lines:
                 c.drawString(text_x, summary_y, summary_line)
                 summary_y -= summary_leading
@@ -699,17 +779,17 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     if tag_text:
         tags_y = max(tags_reserve_y, content_bottom - 6 * mm)
         c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
-        c.setFont("Helvetica", 7.5)
-        c.drawString(text_x, tags_y, fit_pdf_text(c, tag_text, "Helvetica", 7.5, text_w))
+        c.setFont("Helvetica", tag_font_size)
+        c.drawString(text_x, tags_y, fit_pdf_text(c, tag_text, "Helvetica", tag_font_size, width_at(tags_y, tag_font_size)))
         url_y = tags_y - 4 * mm
     else:
         url_y = max(url_reserve_y, content_bottom - 6 * mm)
 
     # Full-width URLs run under the artwork column, so only use that width when
     # the URL has actually dropped below the artwork's bottom edge.
-    use_full_width_url = row_h >= 55 * mm and url_y <= artwork_y - 2 * mm
+    use_full_width_url = not stacked and row_h >= 55 * mm and url_y <= artwork_y - 2 * mm
     url_x = margin if use_full_width_url else text_x
-    url_max_width = W - 2 * margin if use_full_width_url else text_w
+    url_max_width = width_at(url_y, 8, x=url_x)
     url_font_size = 8
     while c.stringWidth(item["url"], "Helvetica", url_font_size) > url_max_width and url_font_size > 6.5:
         url_font_size -= 0.25
