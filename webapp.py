@@ -1701,7 +1701,34 @@ async function refreshHistory(){
         regenerate.textContent = "Regenerate PDF";
       }
     });
-    actions.append(printPdf, download, preview, regenerate, toggle);
+    const layoutSelect = document.createElement("select");
+    layoutSelect.title = "Change this archived poster's layout.";
+    layoutSelect.innerHTML = '<option value="list">List poster</option><option value="single">Single episode</option>';
+    layoutSelect.value = record.layout === "single" ? "single" : "list";
+    layoutSelect.querySelector('option[value="single"]').disabled = episodeCount !== 1;
+    const themeSelect = document.createElement("select");
+    themeSelect.title = "Change this archived poster's theme.";
+    themeSelect.innerHTML = '<option value="dark">Dark</option><option value="ink-saving">White (ink-saving)</option>';
+    themeSelect.value = record.theme === "ink-saving" ? "ink-saving" : "dark";
+    const applySettings = document.createElement("button");
+    applySettings.type = "button";
+    applySettings.textContent = "Apply theme/layout";
+    applySettings.title = "Re-render this same archived poster with the chosen theme and layout, keeping its episodes and edition date.";
+    applySettings.addEventListener("click", async () => {
+      applySettings.disabled = true;
+      applySettings.textContent = "Applying…";
+      try{
+        await postJson("/api/history/update-settings", {manifest:record.manifest, layout:layoutSelect.value, theme:themeSelect.value});
+        notify(`Updated the ${record.edition || record.title || "archived"} PDF.`);
+        await refreshHistory();
+      }catch(error){
+        notify(error.message, {kind:"error"});
+      }finally{
+        applySettings.disabled = false;
+        applySettings.textContent = "Apply theme/layout";
+      }
+    });
+    actions.append(layoutSelect, themeSelect, applySettings, printPdf, download, preview, regenerate, toggle);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = status === "pending" ? "" : "danger";

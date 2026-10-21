@@ -1354,6 +1354,32 @@ def regenerate_history_poster(manifest_name):
         GENERATION_LOCK.release()
 
 
+def update_history_poster_settings(manifest_name, layout, theme):
+    directory = history_directory()
+    directory_resolved = directory.resolve()
+    manifest_path = directory / manifest_name
+    if manifest_path.is_symlink() or manifest_path.resolve().parent != directory_resolved:
+        raise ValueError("Poster history path is not a regular file in the history folder.")
+
+    manifest = read_history_manifest(directory, manifest_name)
+    original_bytes = manifest_path.read_bytes()
+    manifest.pop("manifest", None)
+    manifest.pop("printed", None)
+    manifest.pop("has_print_status", None)
+
+    selected_layout = layout if layout is not None else manifest.get("layout", "list")
+    selected_theme = theme if theme is not None else manifest.get("theme", "dark")
+    manifest["layout"] = validate_layout(selected_layout, manifest.get("slots") or [])
+    manifest["theme"] = validate_poster_theme(selected_theme)
+    atomic_write_json(manifest_path, manifest)
+
+    try:
+        return regenerate_history_poster(manifest_name)
+    except Exception:
+        manifest_path.write_bytes(original_bytes)
+        raise
+
+
 def _xml_local_name(element):
     return element.tag.rsplit("}", 1)[-1].lower()
 
@@ -1913,6 +1939,15 @@ class LocalHandler(BaseHTTPRequestHandler):
                     result = delete_unprinted_history(payload["manifest"])
                 return self._send_json(result)
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/history/update-settings":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("manifest"), str):
+                    raise TypeError("Expected a poster history manifest name.")
+                result = update_history_poster_settings(payload["manifest"], payload.get("layout"), payload.get("theme"))
+                return self._send_json(result)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError, RuntimeError) as error:
                 return self._send_error_json(error, 400)
         if path == "/api/history/regenerate":
             try:

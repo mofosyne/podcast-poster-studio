@@ -463,14 +463,19 @@ def draw_single_poster(pdf, item):
     pdf.setFont("Helvetica-Bold", 11)
     show_name = fit_pdf_text(pdf, item["show"], "Helvetica-Bold", 11, W - 2 * margin)
     pdf.drawCentredString(W / 2, H - margin - 19 * mm, show_name)
-    tags_top = H - margin - 22 * mm
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
+    pdf.setFont("Helvetica", 9)
+    pdf.drawCentredString(
+        W / 2, H - margin - 25 * mm, "Scan to listen, or search for it in your preferred podcast app"
+    )
+    tags_top = H - margin - 29 * mm
     _, tag_rows = draw_tag_bubbles(
         pdf, item.get("tags", []), margin, tags_top, W - 2 * margin, max_rows=2, font_size=7
     )
 
     artwork_size = 96 * mm
     artwork_x = (W - artwork_size) / 2
-    artwork_top = H - margin - (31 + tag_rows * TAG_BUBBLE_LINE_STEP / mm) * mm
+    artwork_top = H - margin - (38 + tag_rows * TAG_BUBBLE_LINE_STEP / mm) * mm
     artwork_y = artwork_top - artwork_size
     artwork_path = artwork_for(item)
     if artwork_path:
@@ -506,7 +511,7 @@ def draw_single_poster(pdf, item):
         pdf.setFont("Helvetica", 10)
         pdf.drawCentredString(W / 2, detail_y, episode_date)
 
-    qr_size = 30 * mm
+    qr_size = 60 * mm
     qr_image = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
     qr_image.save(qr_buffer, kind="PNG")
@@ -593,7 +598,9 @@ if poster_layout == "list":
     c.drawCentredString(W / 2, H - margin - 10 * mm, poster_title)
     c.setFont("Helvetica", 12)
     c.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
-    c.drawCentredString(W / 2, H - margin - 18 * mm, "A curated selection of episodes - scan to listen")
+    c.drawCentredString(
+        W / 2, H - margin - 18 * mm, "Scan to listen, or search for it in your preferred podcast app"
+    )
 
 row_h = (H - margin * 2 - 28 * mm) / len(data)
 top = H - margin - 28 * mm
@@ -613,7 +620,7 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     else:
         draw_placeholder_artwork(c, artwork_x, artwork_y, artwork_size, item["show"])
 
-    qr_size = min(row_h * 0.4, 24 * mm)
+    qr_size = min(row_h * 0.8, 48 * mm)
     qr_img = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
     qr_img.save(qr_buffer, kind="PNG")
