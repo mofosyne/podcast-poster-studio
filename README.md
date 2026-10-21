@@ -6,6 +6,16 @@ A local tool for reviewing podcast feeds and generating a one-page PDF poster wi
 
 The screenshot uses fictional demo subscriptions and artwork; it contains no personal feed data.
 
+## Poster layouts
+
+| Single episode | List, 2 episodes | List, 3 episodes | List, 6 episodes | Ink-saving theme |
+| --- | --- | --- | --- | --- |
+| ![Single-episode poster](docs/posters/single.png) | ![List poster with two episodes](docs/posters/list-2.png) | ![List poster with three episodes](docs/posters/list-3.png) | ![List poster with six episodes](docs/posters/list-6.png) | ![List poster with three episodes in the white ink-saving theme](docs/posters/list-3-ink-saving.png) |
+
+The **single-episode** layout leads with large artwork, then the channel, episode title, date and duration, tags, and summary, with the QR code below. The **list** layout holds up to six episodes and uses the room it has: with fewer episodes the type grows and summaries get more lines. With one or two episodes, the QR code moves under the artwork so the text spans the page. Summaries shrink before being cut short. Both layouts come in a dark theme and a white **ink-saving** theme.
+
+These examples use fictional episodes. Regenerate them with `.venv/bin/python docs/capture_poster_examples.py` (needs `pdftoppm` from poppler-utils).
+
 ## Requirements
 
 - Python 3.10 or newer

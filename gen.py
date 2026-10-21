@@ -463,8 +463,8 @@ def draw_tag_bubbles(pdf, tags, x, top_y, max_width, max_rows, font_size=7, alig
 
 
 def draw_single_poster(pdf, item):
-    # No poster heading: the episode itself leads. Artwork, then the episode
-    # title, its date, the channel, tags and summary, with the QR code below.
+    # No poster heading: the episode itself leads. Artwork, then the channel,
+    # episode title, its date, tags and summary, with the QR code below.
     margin = 18 * mm
     content_width = W - 2 * margin
 
@@ -500,7 +500,7 @@ def draw_single_poster(pdf, item):
         text_height = (
             title_leading * len(title_lines)
             + (6 * mm if subtitle else 0)
-            + 7 * mm
+            + 4.5 * mm + title_font_size * 0.75
             + (len(tag_rows) * TAG_BUBBLE_LINE_STEP + 3 * mm if tag_rows else 0)
             + (summary_leading * len(summary_lines) + 3 * mm if summary_lines else 0)
         )
@@ -521,6 +521,10 @@ def draw_single_poster(pdf, item):
         draw_placeholder_artwork(pdf, artwork_x, artwork_y, artwork_size, item["show"])
 
     cursor_y = artwork_y - art_gap
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
+    pdf.setFont("Helvetica-Bold", show_font_size)
+    pdf.drawCentredString(W / 2, cursor_y, fit_pdf_text(pdf, item["show"], "Helvetica-Bold", show_font_size, content_width))
+    cursor_y -= 2.5 * mm + title_font_size * 0.75
     pdf.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
     pdf.setFont("Helvetica-Bold", title_font_size)
     for line in title_lines:
@@ -533,11 +537,6 @@ def draw_single_poster(pdf, item):
         pdf.setFont("Helvetica", 10)
         pdf.drawCentredString(W / 2, cursor_y, subtitle)
         cursor_y -= 4.5 * mm
-    cursor_y -= 2.5 * mm
-    pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
-    pdf.setFont("Helvetica-Bold", show_font_size)
-    pdf.drawCentredString(W / 2, cursor_y, fit_pdf_text(pdf, item["show"], "Helvetica-Bold", show_font_size, content_width))
-    cursor_y -= 4.5 * mm
     if tag_rows:
         cursor_y -= 1 * mm
         cursor_y, _ = draw_tag_bubbles(
@@ -704,14 +703,7 @@ for i, item in enumerate(data if poster_layout == "list" else []):
 
     show_font_size = 16 + roominess * 4
     show_y = artwork_y + artwork_size - show_font_size * 0.75
-    line_w = width_at(show_y, show_font_size)
-    date_font_size = 9 + roominess
-    c.setFont("Helvetica-Oblique", date_font_size)
-    date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
-    while date_width > line_w * 0.4 and date_font_size > 6.5:
-        date_font_size -= 0.25
-        date_width = c.stringWidth(item["date"], "Helvetica-Oblique", date_font_size)
-    show_name_max_width = max(10 * mm, line_w - date_width - 4 * mm)
+    show_name_max_width = max(10 * mm, width_at(show_y, show_font_size))
 
     # Shrink long show names before falling back to an ellipsis.
     while c.stringWidth(item["show"], "Helvetica-Bold", show_font_size) > show_name_max_width and show_font_size > 11:
@@ -720,10 +712,6 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     c.setFont("Helvetica-Bold", show_font_size)
     show_name = fit_pdf_text(c, item["show"], "Helvetica-Bold", show_font_size, show_name_max_width)
     c.drawString(text_x, show_y, show_name)
-
-    c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
-    c.setFont("Helvetica-Oblique", date_font_size)
-    c.drawRightString(text_x + line_w, show_y, item["date"])
 
     summary = str(item.get("summary") or "").strip()
     # Prefer shrinking the font and wrapping to more lines over truncating the
@@ -747,6 +735,10 @@ for i, item in enumerate(data if poster_layout == "list" else []):
     tag_text = ", ".join(" ".join(str(tag).split("_")) for tag in item.get("tags", []) if str(tag).strip())
     tag_font_size = 7.5 + roominess * 1.5
     tags_reserve_y = url_reserve_y + 4 * mm if tag_text else url_reserve_y
+    # The release date (and duration, when known) sits just above the tags.
+    date_text = " · ".join(part for part in (item.get("date", ""), item.get("duration", "")) if part)
+    date_font_size = 8 + roominess
+    details_reserve_y = tags_reserve_y + 4 * mm if date_text else tags_reserve_y
     content_bottom = title_y + title_leading - 1.5 * mm
 
     if summary:
@@ -756,7 +748,7 @@ for i, item in enumerate(data if poster_layout == "list" else []):
         summary_font_size = 7.5 + roominess * 3
         while True:
             summary_leading = summary_font_size * 1.22
-            available_lines = int((summary_y - (tags_reserve_y + 3 * mm)) / summary_leading) + 1
+            available_lines = int((summary_y - (details_reserve_y + 3 * mm)) / summary_leading) + 1
             max_summary_lines = max(0, min(int(12 + roominess * 18), available_lines))
             summary_lines = wrap_pdf_text(
                 c, summary, "Helvetica", summary_font_size,
@@ -774,17 +766,21 @@ for i, item in enumerate(data if poster_layout == "list" else []):
                 summary_y -= summary_leading
             content_bottom = summary_y + summary_leading
 
-    # Keep the tag line/URL close to the actual content instead of always
-    # sitting at the bottom of the row, which leaves a large gap when a row is
-    # tall (e.g. few episodes on the poster) and the summary is short.
+    # Keep the date, tag line and URL close to the actual content instead of
+    # always sitting at the bottom of the row, which leaves a large gap when a
+    # row is tall (e.g. few episodes on the poster) and the summary is short.
+    detail_y = max(details_reserve_y, content_bottom - 6 * mm)
+    if date_text:
+        c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
+        c.setFont("Helvetica-Oblique", date_font_size)
+        c.drawString(text_x, detail_y, fit_pdf_text(c, date_text, "Helvetica-Oblique", date_font_size, width_at(detail_y, date_font_size)))
+        detail_y -= 4 * mm
     if tag_text:
-        tags_y = max(tags_reserve_y, content_bottom - 6 * mm)
         c.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
         c.setFont("Helvetica", tag_font_size)
-        c.drawString(text_x, tags_y, fit_pdf_text(c, tag_text, "Helvetica", tag_font_size, width_at(tags_y, tag_font_size)))
-        url_y = tags_y - 4 * mm
-    else:
-        url_y = max(url_reserve_y, content_bottom - 6 * mm)
+        c.drawString(text_x, detail_y, fit_pdf_text(c, tag_text, "Helvetica", tag_font_size, width_at(detail_y, tag_font_size)))
+        detail_y -= 4 * mm
+    url_y = detail_y
 
     # Full-width URLs run under the artwork column, so only use that width when
     # the URL has actually dropped below the artwork's bottom edge.
