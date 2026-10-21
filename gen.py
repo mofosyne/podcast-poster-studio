@@ -463,46 +463,35 @@ def draw_tag_bubbles(pdf, tags, x, top_y, max_width, max_rows, font_size=7, alig
 
 
 def draw_single_poster(pdf, item):
+    # No poster heading: the episode itself leads. Artwork, then the episode
+    # title, its date, the channel, tags and summary, with the QR code below.
     margin = 18 * mm
-    title = poster_title
-    title_size = 28
-    while pdf.stringWidth(title, "Helvetica-Bold", title_size) > W - 2 * margin:
-        title_size -= 0.5
-    pdf.setFillColor(colors.HexColor(THEME_COLORS["primary"]))
-    pdf.setFont("Helvetica-Bold", title_size)
-    pdf.drawCentredString(W / 2, H - margin - 10 * mm, title)
-    pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
-    pdf.setFont("Helvetica-Bold", 11)
-    show_name = fit_pdf_text(pdf, item["show"], "Helvetica-Bold", 11, W - 2 * margin)
-    pdf.drawCentredString(W / 2, H - margin - 19 * mm, show_name)
-    pdf.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
-    pdf.setFont("Helvetica", 9)
-    pdf.drawCentredString(
-        W / 2, H - margin - 25 * mm, "Scan to listen, or search for it in your preferred podcast app"
-    )
-    header_bottom = H - margin - 30 * mm
     content_width = W - 2 * margin
 
-    # Footer: the QR code centred under the episode, with its URL beneath.
+    # Footer: the QR code centred at the bottom, with a hint and the URL beneath.
     qr_size = 50 * mm
     url_y = margin + 3 * mm
-    qr_y = url_y + 5 * mm
+    hint_y = url_y + 4.5 * mm
+    qr_y = hint_y + 4.5 * mm
     footer_top = qr_y + qr_size
 
     # Measure the text first; the artwork then takes whatever height is left,
-    # and the whole group is centred between the header and the QR code.
+    # and the whole group is centred between the top margin and the QR code.
     title_lines, title_font_size = fit_title_lines(
-        pdf, item["episode"], "Helvetica-Bold", 22, 15, content_width, 3
+        pdf, item["episode"], "Helvetica-Bold", 24, 15, content_width, 3
     )
     title_leading = title_font_size * 1.2
+    subtitle = " · ".join(part for part in (item.get("date", ""), item.get("duration", "")) if part)
+    show_font_size = 14
+    while pdf.stringWidth(item["show"], "Helvetica-Bold", show_font_size) > content_width and show_font_size > 10:
+        show_font_size -= 0.5
     tag_rows = layout_tag_rows(pdf, item.get("tags", []), content_width, 2, font_size=8)
     summary = str(item.get("summary") or "").strip()
     summary_font_size = 11
     summary_leading = summary_font_size * 1.35
-    episode_date = item.get("date", "")
     art_gap = 9 * mm
-    available = header_bottom - footer_top - 12 * mm
-    min_artwork, max_artwork = 60 * mm, 120 * mm
+    available = H - margin - footer_top - 10 * mm
+    min_artwork, max_artwork = 60 * mm, 135 * mm
     summary_max_lines = 10
     while True:
         summary_lines = wrap_pdf_text(
@@ -510,9 +499,10 @@ def draw_single_poster(pdf, item):
         ) if summary else []
         text_height = (
             title_leading * len(title_lines)
+            + (6 * mm if subtitle else 0)
+            + 7 * mm
             + (len(tag_rows) * TAG_BUBBLE_LINE_STEP + 3 * mm if tag_rows else 0)
             + (summary_leading * len(summary_lines) + 3 * mm if summary_lines else 0)
-            + (6 * mm if episode_date else 0)
         )
         artwork_size = min(max_artwork, available - art_gap - text_height)
         if artwork_size >= min_artwork or summary_max_lines <= 3:
@@ -521,7 +511,7 @@ def draw_single_poster(pdf, item):
         summary_max_lines -= 1
 
     group_height = artwork_size + art_gap + text_height
-    artwork_top = header_bottom - 6 * mm - max(0, available - group_height) / 2
+    artwork_top = H - margin - max(0, available - group_height) / 2
     artwork_x = (W - artwork_size) / 2
     artwork_y = artwork_top - artwork_size
     artwork_path = artwork_for(item)
@@ -537,8 +527,19 @@ def draw_single_poster(pdf, item):
         cursor_y -= title_font_size * 0.2
         pdf.drawCentredString(W / 2, cursor_y, line)
         cursor_y -= title_leading - title_font_size * 0.2
+    if subtitle:
+        cursor_y -= 1.5 * mm
+        pdf.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
+        pdf.setFont("Helvetica", 10)
+        pdf.drawCentredString(W / 2, cursor_y, subtitle)
+        cursor_y -= 4.5 * mm
+    cursor_y -= 2.5 * mm
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["accent"]))
+    pdf.setFont("Helvetica-Bold", show_font_size)
+    pdf.drawCentredString(W / 2, cursor_y, fit_pdf_text(pdf, item["show"], "Helvetica-Bold", show_font_size, content_width))
+    cursor_y -= 4.5 * mm
     if tag_rows:
-        cursor_y -= 2 * mm
+        cursor_y -= 1 * mm
         cursor_y, _ = draw_tag_bubbles(
             pdf, item.get("tags", []), margin, cursor_y, content_width, max_rows=2, font_size=8, align="center"
         )
@@ -550,10 +551,10 @@ def draw_single_poster(pdf, item):
         for line in summary_lines:
             pdf.drawCentredString(W / 2, cursor_y, line)
             cursor_y -= summary_leading
-    if episode_date:
-        pdf.setFillColor(colors.HexColor(THEME_COLORS["muted"]))
-        pdf.setFont("Helvetica", 10)
-        pdf.drawCentredString(W / 2, cursor_y - 2 * mm, episode_date)
+
+    pdf.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
+    pdf.setFont("Helvetica", 9)
+    pdf.drawCentredString(W / 2, hint_y, "Scan to listen, or search for it in your preferred podcast app")
 
     qr_image = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
