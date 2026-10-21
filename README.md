@@ -6,6 +6,16 @@ A local tool for reviewing podcast feeds and generating a one-page PDF poster wi
 
 The screenshot uses fictional demo subscriptions and artwork; it contains no personal feed data.
 
+## Poster layouts
+
+| Single episode | List, 2 episodes | List, 3 episodes | List, 6 episodes | Ink-saving theme |
+| --- | --- | --- | --- | --- |
+| ![Single-episode poster](docs/posters/single.png) | ![List poster with two episodes](docs/posters/list-2.png) | ![List poster with three episodes](docs/posters/list-3.png) | ![List poster with six episodes](docs/posters/list-6.png) | ![List poster with three episodes in the white ink-saving theme](docs/posters/list-3-ink-saving.png) |
+
+The **single-episode** layout leads with large artwork, then the channel, episode title, date and duration, tags, and summary, with the QR code below. The **list** layout holds up to six episodes and uses the room it has: with fewer episodes the type grows and summaries get more lines. With one or two episodes, the QR code moves under the artwork so the text spans the page. Summaries shrink before being cut short. Both layouts come in a dark theme and a white **ink-saving** theme.
+
+These examples use fictional episodes. Regenerate them with `.venv/bin/python docs/capture_poster_examples.py` (needs `pdftoppm` from poppler-utils).
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -124,7 +134,7 @@ or dynamic, resolving to the newest dated episode in its feed each time the post
 }
 ```
 
-The list poster supports up to six slots. Set `poster_layout` to `"list"` or `"single"` in `user-data/config.json`; the single layout requires exactly one slot and uses `single_poster_title`. Set `poster_theme` to `"dark"` (default) or `"ink-saving"` for a white background. The browser workflow exposes both layout and theme selectors and saves them as you change them. Dynamic latest slots appear in the browser workflow's Edit step, where they can be reordered or removed but have no text to edit. Tags are rendered as stable-color, wrapping hashtag bubbles, with as many shown as fit the episode area. If a fixed slot includes a `summary`, it is printed as a short excerpt on the poster. A slot's `tags` override the subscription defaults; omit `tags` in manually configured slots to inherit defaults, or use an empty list to explicitly clear them. Dynamic latest slots also inherit subscription notes and tags. Feed URLs are used for dynamic lookup and artwork; artwork is cached under `user-data/cache/artwork/`, with title-colored placeholder artwork used when no episode or channel art is available.
+The list poster supports up to six slots. Set `poster_layout` to `"list"` or `"single"` in `user-data/config.json`; the single layout requires exactly one slot and prints no heading, leading with the episode artwork (`single_poster_title` only names it in poster history). Set `poster_theme` to `"dark"` (default) or `"ink-saving"` for a white background. The browser workflow exposes both layout and theme selectors and saves them as you change them. Dynamic latest slots appear in the browser workflow's Edit step, where they can be reordered or removed but have no text to edit. Tags are rendered as stable-color, wrapping hashtag bubbles, with as many shown as fit the episode area. If a fixed slot includes a `summary`, it is printed as a short excerpt on the poster. A slot's `tags` override the subscription defaults; omit `tags` in manually configured slots to inherit defaults, or use an empty list to explicitly clear them. Dynamic latest slots also inherit subscription notes and tags. Feed URLs are used for dynamic lookup and artwork; artwork is cached under `user-data/cache/artwork/`, with title-colored placeholder artwork used when no episode or channel art is available.
 
 ## Generate and retain posters
 
