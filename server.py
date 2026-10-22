@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import Request, urlopen
 
+import link_preview
 from fetch_episodes import render_page
 from webapp import APP_HTML
 
@@ -34,6 +35,8 @@ MAX_TAGS_PER_FEED = 12
 MAX_TAG_LENGTH = 40
 MAX_CHANNEL_DESCRIPTION_LENGTH = 400
 MAX_POSTER_SLOTS = 6
+MAX_LINKS = 500
+MAX_LINKS_PER_ADD = 50
 LLM_API_FORMATS = {"openai-compatible", "ollama"}
 LLM_BASE_URL_ENV_KEYS = ("LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OLLAMA_HOST")
 LLM_MODEL_ENV_KEYS = ("LLM_MODEL", "OPENAI_MODEL", "OLLAMA_MODEL")
@@ -616,7 +619,7 @@ def atomic_write_text(path, text):
 
 
 def upgrade_candidate_html(page, candidate_path=None):
-    if 'data-page-version="20"' in page:
+    if 'data-page-version="21"' in page:
         return None
     episode_marker = "const EPISODES = "
     episode_start = page.find(episode_marker)
@@ -879,6 +882,133 @@ def drop_archived_from_shortlist(slots):
         if len(remaining) != len(shortlist):
             config["shortlist"] = remaining
             atomic_write_json(CONFIG_PATH, config)
+
+
+# Hand-added links: a "feed" of web pages (videos, articles, podcast pages) the user
+# pasted in. A link is saved bare the moment it is added and its details are fetched
+# afterwards, so it can be shortlisted or picked before (or without) them.
+LINK_FIELDS = ("url", "show", "episode", "date", "feed_url", "added_at", "status", "error", "published_at",
+               "summary", "description", "duration", "tags", "artwork_path")
+# Details a fetch may fill in on shortlist and poster copies made before it finished.
+LINK_DETAIL_FIELDS = ("show", "episode", "date", "feed_url", "duration", "artwork_path")
+
+
+def get_links(config=None):
+    config = config if config is not None else load_config()
+    links = config.get("links", [])
+    return [link for link in links if isinstance(link, dict) and isinstance(link.get("url"), str)] if isinstance(links, list) else []
+
+
+def parse_link_urls(payload):
+    if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+        candidates = payload["text"].split()
+    elif isinstance(payload, dict) and isinstance(payload.get("urls"), list):
+        candidates = payload["urls"]
+    else:
+        raise TypeError("Expected links as text or a list of URLs.")
+    urls = []
+    for candidate in candidates:
+        url = link_preview.http_url(candidate)
+        if not url:
+            raise ValueError(f"Not a web link: {str(candidate)[:80]!r}. Links must start with http:// or https://.")
+        if len(url) > 2000:
+            raise ValueError("Links must be at most 2000 characters.")
+        if url not in urls:
+            urls.append(url)
+    if not urls:
+        raise ValueError("Paste at least one link.")
+    if len(urls) > MAX_LINKS_PER_ADD:
+        raise ValueError(f"Add at most {MAX_LINKS_PER_ADD} links at a time.")
+    return urls
+
+
+def add_links(payload):
+    urls = parse_link_urls(payload)
+    with CONFIG_LOCK:
+        config = load_config()
+        links = get_links(config)
+        known = {link["url"] for link in links}
+        added = [link_preview.bare_link(url) for url in urls if url not in known]
+        if len(links) + len(added) > MAX_LINKS:
+            raise ValueError(f"The links list holds at most {MAX_LINKS} links. Remove some before adding more.")
+        config["links"] = links + added
+        atomic_write_json(CONFIG_PATH, config)
+    return {"links": config["links"], "added": [link["url"] for link in added]}
+
+
+def remove_link(url):
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("A link URL is required.")
+    with CONFIG_LOCK:
+        config = load_config()
+        links = get_links(config)
+        remaining = [link for link in links if link["url"] != url]
+        if len(remaining) == len(links):
+            raise ValueError("That link is not in the links list.")
+        config["links"] = remaining
+        atomic_write_json(CONFIG_PATH, config)
+    return remaining
+
+
+def refresh_link_copies(entries, link, previous):
+    """Fill fetched details into shortlist or poster copies of a link.
+
+    A field is replaced only while it still holds the placeholder the copy was made
+    with; summaries and tags are only added where the copy has none, so user edits stay.
+    """
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("url") != link["url"]:
+            continue
+        for key in LINK_DETAIL_FIELDS:
+            if key in link and entry.get(key, previous.get(key)) == previous.get(key) and entry.get(key) != link[key]:
+                entry[key] = link[key]
+                changed = True
+        for key in ("summary", "tags"):
+            if link.get(key) and not entry.get(key):
+                entry[key] = link[key]
+                changed = True
+    return changed
+
+
+def fetch_link_details(url):
+    with CONFIG_LOCK:
+        stored = next((link for link in get_links() if link["url"] == url), None)
+    if stored is None:
+        raise ValueError("That link is not in the links list.")
+    artwork_dir = USER_DATA_DIR / "cache" / "artwork"
+    # Fetched outside the config lock: pages can be slow and other edits should not wait.
+    resolved, _ = link_preview.resolve_link(url, artwork_dir)
+    if isinstance(resolved.get("artwork_path"), Path):
+        resolved["artwork_path"] = resolved["artwork_path"].resolve().relative_to(BASE_DIR.resolve()).as_posix()
+
+    with CONFIG_LOCK:
+        config = load_config()
+        links = get_links(config)
+        position = next((index for index, link in enumerate(links) if link["url"] == url), -1)
+        if position < 0:
+            raise ValueError("That link was removed while its details were being fetched.")
+        previous = links[position]
+        if resolved["status"] == "failed":
+            updated = {**previous, "status": "failed", "error": resolved.get("error", "")[:300]}
+        else:
+            updated = {key: resolved[key] for key in LINK_FIELDS if key in resolved and key != "error"}
+            if "published_at" not in updated:
+                updated["date"] = previous.get("date", updated["date"])
+            # Keep the date the link was first added, not when it was refetched.
+            updated["added_at"] = previous.get("added_at", updated["added_at"])
+        links[position] = updated
+        config["links"] = links
+        shortlist = get_shortlist(config)
+        shortlist_changed = refresh_link_copies(shortlist, updated, previous)
+        slots = get_draft_slots(config)
+        draft_changed = refresh_link_copies(slots, updated, previous)
+        if shortlist_changed:
+            config["shortlist"] = shortlist
+        if draft_changed:
+            config["slots"] = slots
+        atomic_write_json(CONFIG_PATH, config)
+    return {"links": links, "link": updated, "shortlist_changed": shortlist_changed, "draft_changed": draft_changed}
 
 
 # The poster draft is the working selection: config["slots"], edited in place by
@@ -1825,6 +1955,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json({"shortlist": get_shortlist()})
             except (OSError, json.JSONDecodeError, ValueError) as error:
                 return self._send_error_json(error, 500)
+        if path == "/api/links":
+            try:
+                return self._send_json({"links": get_links()})
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                return self._send_error_json(error, 500)
         if path == "/api/draft":
             try:
                 return self._send_json(get_draft())
@@ -1968,6 +2103,22 @@ class LocalHandler(BaseHTTPRequestHandler):
                 payload = json.loads(self._read_body(MAX_JSON_BYTES))
                 shortlist = add_to_shortlist(payload)
                 return self._send_json({"shortlist": shortlist})
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/links":
+            try:
+                payload = json.loads(self._read_body(MAX_JSON_BYTES))
+                return self._send_json(add_links(payload))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path in ("/api/links/remove", "/api/links/fetch"):
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+                    raise TypeError("Expected a link URL.")
+                if path == "/api/links/remove":
+                    return self._send_json({"links": remove_link(payload["url"])})
+                return self._send_json(fetch_link_details(payload["url"]))
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
                 return self._send_error_json(error, 400)
         if path == "/api/shortlist/remove":

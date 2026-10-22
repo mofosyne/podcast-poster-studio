@@ -200,7 +200,7 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("\\u003c/script>", page)
         self.assertIn("Earlier poster", page)
         self.assertIn("1 previously posted", page)
-        self.assertIn('data-page-version="20"', page)
+        self.assertIn('data-page-version="21"', page)
         self.assertIn("up to 400 characters", page)
         # Standalone (file) mode keeps its own review step and fixed-slot export.
         self.assertIn("Episode tags (edit these suggestions for this episode only)", page)

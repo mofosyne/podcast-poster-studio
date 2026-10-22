@@ -98,6 +98,11 @@ a{color:inherit;text-decoration:none}
 a:hover{color:var(--accent);text-decoration:underline}
 .meta{font-size:13px;color:var(--muted);margin-top:3px}
 .not-in-scan{font-size:12px;color:var(--orange);margin-top:3px}
+.link-note{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:4px}
+.link-note.failed{color:var(--orange)}
+.link-note button{padding:2px 9px;font-size:12px;font-weight:600}
+.link-form{padding:9px 12px;border:1px solid var(--line);border-radius:7px;background:#171c19;align-items:flex-start}
+.link-form textarea{flex:1;min-width:220px;min-height:44px;resize:vertical;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px 12px;font:inherit}
 .description{margin-top:7px;color:var(--muted);font-size:13px;cursor:auto}
 .description summary{color:var(--accent);cursor:pointer}
 .description p{margin:5px 0 0;line-height:1.45}
@@ -137,7 +142,7 @@ html.embedded .paging{margin-bottom:6px}
 @media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date,.shortlist-button{grid-column:3}.shortlist-button{justify-self:start}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
 </style>
 </head>
-<body data-page-version="20">
+<body data-page-version="21">
 <main>
   <h1>Podcast episode archive</h1>
   <p class="subtitle" id="intro">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
@@ -147,10 +152,17 @@ html.embedded .paging{margin-bottom:6px}
     <div class="view-filters" role="group" aria-label="Show episodes">
       <button type="button" class="chip" data-filter="all" aria-pressed="true">All</button>
       <button type="button" class="chip" data-filter="shortlist" aria-pressed="false" id="shortlistFilter" hidden>★ Shortlisted <span id="shortlistFilterCount">0</span></button>
+      <button type="button" class="chip" data-filter="links" aria-pressed="false" id="linksFilter" hidden>🔗 Links <span id="linksFilterCount">0</span></button>
       <button type="button" class="chip" data-filter="selected" aria-pressed="false">✓ Selected <span id="selectedFilterCount">0</span></button>
     </div>
+    <button id="addLinks" type="button" aria-expanded="false" aria-controls="linkForm" hidden>+ Add links</button>
     <button id="clear" type="button">Clear selection</button>
   </div>
+  <form class="controls link-form" id="linkForm" hidden>
+    <textarea id="linkInput" aria-label="Links to add" placeholder="Paste one or more links: YouTube or Vimeo videos, SoundCloud or Spotify episodes, articles, any web page. One per line."></textarea>
+    <button id="submitLinks" class="primary" type="submit">Add</button>
+    <div id="linkStatus" class="bulk-suggestion-status" aria-live="polite">Links are saved straight away under 🔗 Links. Titles, artwork, and descriptions are filled in after; you can shortlist or pick a link before they arrive.</div>
+  </form>
   <div class="controls ai-tools" id="aiTools" hidden>
     <span class="ai-label">AI drafts</span>
     <label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" step="1" value="10"></label>
@@ -187,6 +199,13 @@ const nextPage = document.getElementById("nextPage");
 const shortlistFilter = document.getElementById("shortlistFilter");
 const shortlistFilterCount = document.getElementById("shortlistFilterCount");
 const selectedFilterCount = document.getElementById("selectedFilterCount");
+const linksFilter = document.getElementById("linksFilter");
+const linksFilterCount = document.getElementById("linksFilterCount");
+const addLinksButton = document.getElementById("addLinks");
+const linkForm = document.getElementById("linkForm");
+const linkInput = document.getElementById("linkInput");
+const submitLinksButton = document.getElementById("submitLinks");
+const linkStatus = document.getElementById("linkStatus");
 const PAGE_SIZE = 200;
 const MAX_POSTER_SELECTION = 6;
 // Embedded in the studio (server.py serves this page in an iframe), the poster draft is
@@ -224,6 +243,9 @@ let llmSuggestionsLoaded = false;
 let bulkSuggestionsRunning = false;
 let stopBulkSuggestionsRequested = false;
 let shortlistedUrls = new Set();
+let linkUrls = new Set();
+let linkFetchQueue = Promise.resolve();
+let linkFetchesWaiting = 0;
 let toastTimer = null;
 let query = "";
 
@@ -497,6 +519,162 @@ async function loadShortlist(){
   }
 }
 
+// Hand-added links behave like episodes from a feed of their own. A link is listed
+// as soon as it is saved; its title, artwork, and description arrive once fetched.
+function linkEpisode(link){
+  const episode = {
+    show:String(link.show || ""),
+    episode:String(link.episode || link.url),
+    date:String(link.date || ""),
+    published_at:typeof link.published_at === "string" ? link.published_at : "",
+    added_at:typeof link.added_at === "string" ? link.added_at : "",
+    url:link.url,
+    feed_url:String(link.feed_url || ""),
+    description:typeof link.description === "string" ? link.description : "",
+    summary:typeof link.summary === "string" ? link.summary : "",
+    duration:typeof link.duration === "string" ? link.duration : "",
+    tags:Array.isArray(link.tags) ? link.tags : [],
+    is_link:true,
+    link_status:link.status || "pending",
+    link_error:typeof link.error === "string" ? link.error : "",
+    not_in_scan:false,
+  };
+  if(typeof link.artwork_path === "string" && link.artwork_path){
+    episode.artwork_path = link.artwork_path;
+    episode.artwork = `/cache/artwork/${encodeURIComponent(link.artwork_path.split("/").pop())}`;
+  }
+  return episode;
+}
+
+function applyLink(link){
+  if(!link || typeof link.url !== "string") return;
+  const episode = linkEpisode(link);
+  if(episodeIndexByUrl.has(link.url)){
+    const existing = EPISODES[episodeIndexByUrl.get(link.url)];
+    // A link that is also in a feed scan keeps the feed's richer details.
+    if(existing.is_link || existing.not_in_scan) Object.assign(existing, episode);
+    else existing.is_link = true;
+  } else {
+    EPISODES.push(episode);
+    episodeIndexByUrl.set(link.url, EPISODES.length - 1);
+  }
+  linkUrls.add(link.url);
+}
+
+function applyLinks(links){
+  for(const url of linkUrls){
+    if(links.some(link => link && link.url === url)) continue;
+    const episode = EPISODES[episodeIndexByUrl.get(url)];
+    if(episode && episode.link_status){
+      episode.is_link = false;
+      episode.not_in_scan = true;
+    } else if(episode) episode.is_link = false;
+  }
+  linkUrls = new Set();
+  links.forEach(applyLink);
+  render();
+}
+
+async function loadLinks(){
+  if(!runningInServer) return;
+  try{
+    const response = await fetch("/api/links");
+    if(!response.ok) return;
+    const data = await response.json();
+    const links = Array.isArray(data.links) ? data.links : [];
+    applyLinks(links);
+    links.filter(link => link && link.status === "pending").forEach(link => queueLinkFetch(link.url));
+  }catch(error){
+    // Links are best-effort here; the feed episodes still work without them.
+  }
+}
+
+function updateLinkStatus(message){
+  linkStatus.textContent = message || (linkFetchesWaiting
+    ? `Fetching details for ${linkFetchesWaiting} link${linkFetchesWaiting === 1 ? "" : "s"}…`
+    : "Links are saved straight away under 🔗 Links. Titles, artwork, and descriptions are filled in after; you can shortlist or pick a link before they arrive.");
+}
+
+// Fetch one link at a time so a long paste does not flood remote sites.
+function queueLinkFetch(url){
+  linkFetchesWaiting++;
+  updateLinkStatus();
+  const index = episodeIndexByUrl.get(url);
+  if(index !== undefined && EPISODES[index].is_link){
+    EPISODES[index].link_status = "pending";
+    EPISODES[index].link_error = "";
+  }
+  render();
+  linkFetchQueue = linkFetchQueue.then(async () => {
+    try{
+      const response = await fetch("/api/links/fetch", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({url})
+      });
+      const result = await response.json();
+      if(!response.ok) throw new Error(result.error || "Could not fetch link details.");
+      applyLinks(Array.isArray(result.links) ? result.links : []);
+      if(result.shortlist_changed) loadShortlist();
+      if(result.draft_changed) postToStudio({type:"draft-refresh"});
+    }catch(error){
+      const failedIndex = episodeIndexByUrl.get(url);
+      if(failedIndex !== undefined && EPISODES[failedIndex].is_link){
+        EPISODES[failedIndex].link_status = "failed";
+        EPISODES[failedIndex].link_error = error.message;
+      }
+    }finally{
+      linkFetchesWaiting--;
+      updateLinkStatus();
+      render();
+    }
+  });
+}
+
+async function addLinks(event){
+  event.preventDefault();
+  const text = linkInput.value.trim();
+  if(!text) return;
+  submitLinksButton.disabled = true;
+  try{
+    const response = await fetch("/api/links", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || "Could not add those links.");
+    linkInput.value = "";
+    applyLinks(Array.isArray(result.links) ? result.links : []);
+    const added = Array.isArray(result.added) ? result.added : [];
+    added.forEach(queueLinkFetch);
+    showToast(added.length
+      ? `Added ${added.length} link${added.length === 1 ? "" : "s"}. Find ${added.length === 1 ? "it" : "them"} under 🔗 Links.`
+      : "Those links are already in your list.");
+    setViewFilter("links");
+  }catch(error){
+    updateLinkStatus(error.message);
+  }finally{
+    submitLinksButton.disabled = false;
+  }
+}
+
+async function removeLink(url){
+  try{
+    const response = await fetch("/api/links/remove", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url})
+    });
+    const result = await response.json();
+    if(!response.ok) throw new Error(result.error || "Could not remove that link.");
+    applyLinks(Array.isArray(result.links) ? result.links : []);
+    if(shortlistedUrls.has(url)) showToast("Link removed. It stays on your shortlist until you remove it there.");
+  }catch(error){
+    showToast(error.message);
+  }
+}
+
 async function toggleShortlist(index, button){
   const episode = EPISODES[index];
   const isShortlisted = shortlistedUrls.has(episode.url);
@@ -556,6 +734,7 @@ function emptyMessage(){
   if(query.trim()) return "No episodes match that filter.";
   if(viewFilter === "shortlist") return "Nothing shortlisted yet. Use ☆ Shortlist on any episode to keep it for a later poster.";
   if(viewFilter === "selected") return "No episodes selected yet. Tick up to six episodes for this poster.";
+  if(viewFilter === "links") return "No links yet. Use + Add links to paste a video, article, or any web page.";
   return "No episodes found. Scan your subscriptions to build the list.";
 }
 
@@ -564,9 +743,16 @@ function render(){
   const matches = EPISODES.map((episode, index) => ({episode, index})).filter(({episode, index}) => {
     if(viewFilter === "selected" && !selection.has(index)) return false;
     if(viewFilter === "shortlist" && !shortlistedUrls.has(episode.url)) return false;
+    if(viewFilter === "links" && !episode.is_link) return false;
     if(viewFilter === "all" && episode.not_in_scan && !selection.has(index) && !shortlistedUrls.has(episode.url)) return false;
-    return !needle || `${episode.show} ${episode.episode}`.toLowerCase().includes(needle);
+    return !needle || `${episode.show} ${episode.episode} ${episode.is_link ? episode.url : ""}`.toLowerCase().includes(needle);
   });
+  // Feed episodes arrive newest first; slot links in by publish (or added) date.
+  // Orphans with no date stay at the end, as before.
+  if(linkUrls.size){
+    const sortTime = episode => Date.parse(episode.published_at || episode.added_at || "") || -Infinity;
+    matches.sort((left, right) => sortTime(right.episode) - sortTime(left.episode) || left.index - right.index);
+  }
   const pageCount = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
   currentPage = Math.min(currentPage, pageCount - 1);
   const firstIndex = currentPage * PAGE_SIZE;
@@ -608,7 +794,7 @@ function render(){
       thumbnail = document.createElement("div");
       thumbnail.className = "thumbnail-placeholder";
       thumbnail.setAttribute("aria-hidden", "true");
-      thumbnail.textContent = "♫";
+      thumbnail.textContent = episode.is_link ? "🔗" : "♫";
     }
     const body = document.createElement("div");
     const show = document.createElement("div");
@@ -639,12 +825,40 @@ function render(){
     title.append(link);
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = episode.duration ? `${episode.duration} listen` : "Duration not listed";
-    body.append(show, title, meta);
+    if(episode.is_link) meta.textContent = episode.duration || (episode.link_status === "ready" ? "Web link" : "");
+    else meta.textContent = episode.duration ? `${episode.duration} listen` : "Duration not listed";
+    body.append(show, title);
+    if(meta.textContent) body.append(meta);
+    if(episode.is_link){
+      const note = document.createElement("div");
+      note.className = episode.link_status === "failed" ? "link-note failed" : "link-note";
+      const label = document.createElement("span");
+      label.textContent = episode.link_status === "pending"
+        ? "🔗 Added link · fetching details…"
+        : episode.link_status === "failed"
+          ? `🔗 Added link · couldn't fetch details${episode.link_error ? ` (${episode.link_error})` : ""}`
+          : "🔗 Added link";
+      note.append(label);
+      if(episode.link_status !== "pending"){
+        const refetch = document.createElement("button");
+        refetch.type = "button";
+        refetch.textContent = episode.link_status === "failed" ? "Retry" : "Refetch details";
+        refetch.addEventListener("click", () => queueLinkFetch(episode.url));
+        note.append(refetch);
+      }
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove link";
+      remove.addEventListener("click", () => removeLink(episode.url));
+      note.append(remove);
+      body.append(note);
+    }
     if(episode.not_in_scan){
       const note = document.createElement("div");
       note.className = "not-in-scan";
-      note.textContent = "No longer in the latest feed scan; kept from your poster or shortlist.";
+      note.textContent = episode.link_status
+        ? "Removed from your links; kept from your poster or shortlist."
+        : "No longer in the latest feed scan; kept from your poster or shortlist.";
       body.append(note);
     }
     if(Array.isArray(episode.tags) && episode.tags.length){
@@ -725,6 +939,9 @@ function updateSelection(){
   selectedFilterCount.textContent = String(selection.size);
   shortlistFilterCount.textContent = String(shortlistedUrls.size);
   shortlistFilter.hidden = !runningInServer;
+  linksFilterCount.textContent = String(linkUrls.size);
+  linksFilter.hidden = !runningInServer;
+  addLinksButton.hidden = !runningInServer;
   updateBulkSuggestionControls();
 }
 
@@ -739,13 +956,14 @@ search.addEventListener("input", event => { query = event.target.value; currentP
 previousPage.addEventListener("click", () => goToPage(currentPage - 1));
 nextPage.addEventListener("click", () => goToPage(currentPage + 1));
 document.getElementById("clear").addEventListener("click", () => { selection.clear(); render(); });
+function setViewFilter(filter){
+  viewFilter = filter;
+  for(const chip of document.querySelectorAll("[data-filter]")) chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
+  currentPage = 0;
+  render();
+}
 for(const chip of document.querySelectorAll("[data-filter]")){
-  chip.addEventListener("click", () => {
-    viewFilter = chip.dataset.filter;
-    for(const other of document.querySelectorAll("[data-filter]")) other.setAttribute("aria-pressed", String(other === chip));
-    currentPage = 0;
-    render();
-  });
+  chip.addEventListener("click", () => setViewFilter(chip.dataset.filter));
 }
 document.addEventListener("keydown", event => {
   if(event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -974,6 +1192,16 @@ stopBulkSuggestionsButton.addEventListener("click", () => {
 render();
 if(runningInServer) loadLlmSuggestions();
 if(runningInServer) loadShortlist();
+if(runningInServer) loadLinks();
+addLinksButton.addEventListener("click", () => {
+  linkForm.hidden = !linkForm.hidden;
+  addLinksButton.setAttribute("aria-expanded", String(!linkForm.hidden));
+  if(!linkForm.hidden) linkInput.focus();
+});
+linkForm.addEventListener("submit", addLinks);
+linkInput.addEventListener("keydown", event => {
+  if(event.key === "Enter" && (event.ctrlKey || event.metaKey)) linkForm.requestSubmit();
+});
 </script>
 </body>
 </html>
@@ -1065,8 +1293,10 @@ def episode_duration(item):
 
 
 def episode_description(item):
+    # YouTube channel feeds keep each video's description inside <media:group>.
+    children = list(item) + [child for group in item if local_name(group.tag) == "group" for child in group]
     for name in ("summary", "description", "subtitle", "encoded", "content"):
-        for child in item:
+        for child in children:
             if local_name(child.tag) != name:
                 continue
             parser = DescriptionTextParser()

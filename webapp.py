@@ -703,6 +703,9 @@ window.addEventListener("message", event => {
     mutateDraft("/api/draft/add", {slot:data.slot}, {syncFrame:false}).catch(() => {});
   } else if(data.type === "draft-remove" && typeof data.key === "string"){
     mutateDraft("/api/draft/remove", {key:data.key}, {syncFrame:false}).catch(() => {});
+  } else if(data.type === "draft-refresh"){
+    // A hand-added link's details arrived after it was picked.
+    loadDraft({syncFrame:false}).catch(() => {});
   } else if(data.type === "toast"){
     notify(String(data.message || ""));
   } else if(data.type === "frame-height"){
