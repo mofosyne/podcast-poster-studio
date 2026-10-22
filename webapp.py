@@ -5,6 +5,8 @@ APP_HTML = r'''<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Podcast Poster Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111412'/%3E%3Cpath d='M9 22V10l14 6z' fill='%234fd1c5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
 :root{color-scheme:dark;--bg:#111412;--panel:#1a1f1c;--panel-2:#151a17;--line:#303a34;--muted:#9ba79f;--text:#edf2ee;--accent:#4fd1c5;--orange:#f0ad63;--danger:#ffb4a9}
 *{box-sizing:border-box}
@@ -96,6 +98,13 @@ a{color:var(--accent)}
 .history-meta{color:var(--muted);font-size:13px}
 .history-preview{grid-column:1/-1}
 .history-preview iframe{width:100%;height:60vh;min-height:420px;border:1px solid var(--line);border-radius:8px;margin-top:8px}
+.history-locations{grid-column:1/-1;margin-top:8px}
+.location-map{height:280px;border:1px solid var(--line);border-radius:8px}
+.location-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.location-item{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 12px;font-size:13px}
+.location-item button{padding:2px 8px;font-size:12px}
+.location-known{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.location-known button{font-size:13px}
 .subscription-row{display:grid;grid-template-columns:64px minmax(170px,1fr) minmax(180px,2fr);gap:12px;align-items:center;border-top:1px solid var(--line);padding:10px 2px}
 .subscription-thumbnail,.subscription-thumbnail-placeholder{width:64px;height:64px;border-radius:5px;background:var(--panel)}
 .subscription-thumbnail{object-fit:cover}
@@ -1728,7 +1737,137 @@ async function refreshHistory(){
         applySettings.textContent = "Apply theme/layout";
       }
     });
-    actions.append(layoutSelect, themeSelect, applySettings, printPdf, download, preview, regenerate, toggle);
+    const locationsContainer = document.createElement("div");
+    locationsContainer.className = "history-locations";
+    locationsContainer.hidden = true;
+    const locationsToggle = document.createElement("button");
+    locationsToggle.type = "button";
+    locationsToggle.textContent = `Locations (${(record.locations || []).length})`;
+    let locationsMap = null;
+    locationsToggle.addEventListener("click", async () => {
+      locationsContainer.hidden = !locationsContainer.hidden;
+      if(locationsContainer.hidden || locationsMap) return;
+      locationsContainer.replaceChildren();
+      const hint = document.createElement("p");
+      hint.className = "notice";
+      hint.textContent = "Click the map to drop a pin for a spot you posted this poster at.";
+      const mapDiv = document.createElement("div");
+      mapDiv.className = "location-map";
+      const list = document.createElement("div");
+      list.className = "location-list";
+      const knownContainer = document.createElement("div");
+      knownContainer.className = "location-known";
+      locationsContainer.append(hint, mapDiv, list, knownContainer);
+      locationsMap = L.map(mapDiv, {center:[20, 0], zoom:2});
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+      }).addTo(locationsMap);
+      const markers = [];
+      const knownMarkers = [];
+      async function addKnownPlace(place){
+        try{
+          const updated = await postJson("/api/history/location/add", {manifest:record.manifest, text:place.text, lat:place.lat, lng:place.lng});
+          record.locations = updated.locations || [];
+          locationsToggle.textContent = `Locations (${record.locations.length})`;
+          renderLocations(record.locations);
+          renderKnown();
+        }catch(error){ notify(error.message, {kind:"error"}); }
+      }
+      async function renderKnown(){
+        let known;
+        try{ known = await requestJson("/api/history/known-locations"); }
+        catch(error){ known = []; }
+        const used = new Set((record.locations || []).map(place => place.text.trim().toLowerCase()));
+        const remaining = known.filter(place => !used.has(place.text.trim().toLowerCase()));
+        for(const marker of knownMarkers) locationsMap.removeLayer(marker);
+        knownMarkers.length = 0;
+        for(const place of remaining){
+          const marker = L.circleMarker([place.lat, place.lng], {
+            radius: 8, color: "#4fd1c5", weight: 2, fillColor: "#4fd1c5", fillOpacity: 0.25,
+            bubblingMouseEvents: false,
+          }).addTo(locationsMap).bindTooltip(`${place.text} (click to add)`);
+          marker.on("click", () => addKnownPlace(place));
+          knownMarkers.push(marker);
+        }
+        knownContainer.replaceChildren();
+        if(!remaining.length) return;
+        const label = document.createElement("p");
+        label.className = "notice";
+        label.textContent = "Or add a place you've used before (also shown as rings on the map):";
+        const chips = document.createElement("div");
+        chips.className = "location-list";
+        for(const place of remaining){
+          const addKnown = document.createElement("button");
+          addKnown.type = "button";
+          addKnown.textContent = place.text;
+          addKnown.addEventListener("click", () => addKnownPlace(place));
+          chips.append(addKnown);
+        }
+        knownContainer.append(label, chips);
+      }
+      function renderLocations(locations){
+        list.replaceChildren();
+        for(const marker of markers) locationsMap.removeLayer(marker);
+        markers.length = 0;
+        locations.forEach((place, index) => {
+          const marker = L.marker([place.lat, place.lng]).addTo(locationsMap).bindPopup(place.text);
+          markers.push(marker);
+          const item = document.createElement("div");
+          item.className = "location-item";
+          const label = document.createElement("span");
+          label.textContent = place.text;
+          const renameLocation = document.createElement("button");
+          renameLocation.type = "button";
+          renameLocation.textContent = "Rename";
+          renameLocation.addEventListener("click", async () => {
+            const text = window.prompt("Rename this spot:", place.text);
+            if(!text || !text.trim() || text.trim() === place.text) return;
+            try{
+              const updated = await postJson("/api/history/location/rename", {manifest:record.manifest, index, text});
+              record.locations = updated.locations || [];
+              renderLocations(record.locations);
+              renderKnown();
+            }catch(error){ notify(error.message, {kind:"error"}); }
+          });
+          const removeLocation = document.createElement("button");
+          removeLocation.type = "button";
+          removeLocation.textContent = "Remove";
+          removeLocation.addEventListener("click", async () => {
+            try{
+              const updated = await postJson("/api/history/location/remove", {manifest:record.manifest, index});
+              record.locations = updated.locations || [];
+              locationsToggle.textContent = `Locations (${record.locations.length})`;
+              renderLocations(record.locations);
+              renderKnown();
+            }catch(error){ notify(error.message, {kind:"error"}); }
+          });
+          item.append(label, renameLocation, removeLocation);
+          list.append(item);
+        });
+        if(locations.length) locationsMap.fitBounds(locations.map(place => [place.lat, place.lng]), {maxZoom:14, padding:[24, 24]});
+      }
+      locationsMap.on("click", async (event) => {
+        const text = window.prompt("Label this spot (e.g. a venue or street name):");
+        if(!text) return;
+        try{
+          const updated = await postJson("/api/history/location/add", {manifest:record.manifest, text, lat:event.latlng.lat, lng:event.latlng.lng});
+          record.locations = updated.locations || [];
+          locationsToggle.textContent = `Locations (${record.locations.length})`;
+          renderLocations(record.locations);
+          renderKnown();
+        }catch(error){ notify(error.message, {kind:"error"}); }
+      });
+      renderLocations(record.locations || []);
+      await renderKnown();
+      if(!(record.locations || []).length){
+        const knownCoords = knownMarkers.map(marker => marker.getLatLng());
+        if(knownCoords.length) locationsMap.fitBounds(knownCoords, {maxZoom: 14, padding: [24, 24]});
+        else locationsMap.setView([20, 0], 2);
+      }
+      requestAnimationFrame(() => locationsMap.invalidateSize());
+    });
+    actions.append(layoutSelect, themeSelect, applySettings, printPdf, download, preview, regenerate, toggle, locationsToggle);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = status === "pending" ? "" : "danger";
@@ -1746,7 +1885,7 @@ async function refreshHistory(){
       }catch(error){ notify(error.message, {kind:"error"}); }
     });
     actions.append(remove);
-    row.append(title, generated, state, actions, previewContainer);
+    row.append(title, generated, state, actions, previewContainer, locationsContainer);
     historyList.append(row);
   }
 }

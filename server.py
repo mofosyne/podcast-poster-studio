@@ -1380,6 +1380,102 @@ def update_history_poster_settings(manifest_name, layout, theme):
         raise
 
 
+MAX_LOCATION_TEXT_LENGTH = 200
+MAX_LOCATIONS_PER_POSTER = 100
+
+
+def _validate_location_text(text):
+    if not isinstance(text, str):
+        raise ValueError("Location label must be text.")
+    text = text.strip()
+    if not text:
+        raise ValueError("Location label cannot be empty.")
+    if len(text) > MAX_LOCATION_TEXT_LENGTH:
+        raise ValueError(f"Location label must be {MAX_LOCATION_TEXT_LENGTH} characters or fewer.")
+    return text
+
+
+def _validate_location_coords(lat, lng):
+    if isinstance(lat, bool) or isinstance(lng, bool) or not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+        raise ValueError("Location coordinates must be numbers.")
+    if not -90 <= lat <= 90 or not -180 <= lng <= 180:
+        raise ValueError("Location coordinates are out of range.")
+    return float(lat), float(lng)
+
+
+def _load_history_manifest_for_write(directory, manifest_name):
+    manifest = read_history_manifest(directory, manifest_name)
+    manifest.pop("manifest", None)
+    manifest.pop("printed", None)
+    manifest.pop("has_print_status", None)
+    return manifest
+
+
+def add_history_location(manifest_name, text, lat, lng):
+    directory = history_directory()
+    manifest = _load_history_manifest_for_write(directory, manifest_name)
+    locations = manifest.get("locations")
+    locations = list(locations) if isinstance(locations, list) else []
+    if len(locations) >= MAX_LOCATIONS_PER_POSTER:
+        raise ValueError(f"A poster can track at most {MAX_LOCATIONS_PER_POSTER} locations.")
+    clean_lat, clean_lng = _validate_location_coords(lat, lng)
+    locations.append({"text": _validate_location_text(text), "lat": clean_lat, "lng": clean_lng})
+    manifest["locations"] = locations
+    atomic_write_json(directory / manifest_name, manifest)
+    return read_history_manifest(directory, manifest_name)
+
+
+def remove_history_location(manifest_name, index):
+    directory = history_directory()
+    manifest = _load_history_manifest_for_write(directory, manifest_name)
+    locations = manifest.get("locations")
+    if isinstance(index, bool) or not isinstance(locations, list) or not isinstance(index, int) or not 0 <= index < len(locations):
+        raise ValueError("Invalid location index.")
+    locations.pop(index)
+    manifest["locations"] = locations
+    atomic_write_json(directory / manifest_name, manifest)
+    return read_history_manifest(directory, manifest_name)
+
+
+def rename_history_location(manifest_name, index, text):
+    directory = history_directory()
+    manifest = _load_history_manifest_for_write(directory, manifest_name)
+    locations = manifest.get("locations")
+    if isinstance(index, bool) or not isinstance(locations, list) or not isinstance(index, int) or not 0 <= index < len(locations):
+        raise ValueError("Invalid location index.")
+    locations = list(locations)
+    locations[index] = {**locations[index], "text": _validate_location_text(text)}
+    manifest["locations"] = locations
+    atomic_write_json(directory / manifest_name, manifest)
+    return read_history_manifest(directory, manifest_name)
+
+
+def list_known_locations():
+    directory = history_directory()
+    if not directory.is_dir():
+        return []
+    seen = {}
+    paths = sorted(directory.glob("poster-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths:
+        try:
+            manifest = read_history_manifest(directory, path.name)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        for place in manifest.get("locations") or []:
+            if not isinstance(place, dict):
+                continue
+            text, lat, lng = place.get("text"), place.get("lat"), place.get("lng")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            try:
+                clean_lat, clean_lng = _validate_location_coords(lat, lng)
+            except ValueError:
+                continue
+            key = text.strip().casefold()
+            seen.setdefault(key, {"text": text.strip(), "lat": clean_lat, "lng": clean_lng})
+    return sorted(seen.values(), key=lambda item: item["text"].casefold())
+
+
 def _xml_local_name(element):
     return element.tag.rsplit("}", 1)[-1].lower()
 
@@ -1719,6 +1815,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json(get_history())
             except (OSError, json.JSONDecodeError, ValueError) as error:
                 return self._send_error_json(error, 500)
+        if path == "/api/history/known-locations":
+            try:
+                return self._send_json(list_known_locations())
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                return self._send_error_json(error, 500)
         if path == "/api/shortlist":
             try:
                 return self._send_json({"shortlist": get_shortlist()})
@@ -1948,6 +2049,33 @@ class LocalHandler(BaseHTTPRequestHandler):
                 result = update_history_poster_settings(payload["manifest"], payload.get("layout"), payload.get("theme"))
                 return self._send_json(result)
             except (OSError, TypeError, ValueError, json.JSONDecodeError, RuntimeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/history/location/add":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("manifest"), str):
+                    raise TypeError("Expected a poster history manifest name.")
+                result = add_history_location(payload["manifest"], payload.get("text"), payload.get("lat"), payload.get("lng"))
+                return self._send_json(result)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/history/location/remove":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("manifest"), str):
+                    raise TypeError("Expected a poster history manifest name.")
+                result = remove_history_location(payload["manifest"], payload.get("index"))
+                return self._send_json(result)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path == "/api/history/location/rename":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("manifest"), str):
+                    raise TypeError("Expected a poster history manifest name.")
+                result = rename_history_location(payload["manifest"], payload.get("index"), payload.get("text"))
+                return self._send_json(result)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
                 return self._send_error_json(error, 400)
         if path == "/api/history/regenerate":
             try:
