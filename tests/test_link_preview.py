@@ -85,10 +85,36 @@ class LinkPreviewTests(unittest.TestCase):
         self.assertEqual(entry["date"], "January 2, 2026")
         self.assertEqual(entry["duration"], "12 min")
         self.assertEqual(entry["tags"], ["Trains", "urbanism"])
-        # The page's full-size image beats oEmbed's letterboxed thumbnail.
+        # The page's own image is tried first and used when it downloads.
         self.assertEqual(cached, ["https://i.ytimg.com/vi/abc123/maxresdefault.jpg"])
         self.assertTrue(entry["artwork_path"].name.startswith("link-"))
         self.assertEqual(warnings, [])
+
+    def test_youtube_without_page_prefers_full_size_thumbnail_over_letterboxed_one(self):
+        url = "https://youtu.be/abcdefghijk"
+        attempts = []
+
+        def cache(image_url, cache_path):
+            attempts.append(image_url)
+            return (None, "unavailable") if "maxresdefault" in image_url else (cache_path, "downloaded")
+
+        with (
+            patch.object(link_preview, "fetch_bytes", side_effect=fake_fetch({
+                "https://youtu.be/": URLError("HTTP Error 429"),
+                "https://www.youtube.com/oembed?": YOUTUBE_OEMBED,
+            })),
+            patch.object(link_preview, "cache_artwork_image", side_effect=cache),
+        ):
+            entry, _ = link_preview.resolve_link(url, Path("/cache/artwork"), NOW)
+
+        self.assertEqual(entry["status"], "ready")
+        self.assertEqual(attempts, [
+            "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
+            "https://i.ytimg.com/vi/abc123/hqdefault.jpg",
+        ])
+        self.assertIn("artwork_path", entry)
+        self.assertEqual(link_preview.youtube_video_id("https://www.youtube.com/shorts/abcdefghijk?feature=share"), "abcdefghijk")
+        self.assertEqual(link_preview.youtube_video_id("https://example.com/watch?v=abcdefghijk"), "")
 
     def test_youtube_short_links_use_the_youtube_oembed_endpoint(self):
         endpoint = link_preview.oembed_endpoint("https://youtu.be/abc123", "")

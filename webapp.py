@@ -38,6 +38,9 @@ button.danger{color:var(--danger);border-color:#8e3c39}
 button.link-button{background:none;border:0;color:var(--accent);padding:0;text-decoration:underline;font:inherit}
 button:disabled{opacity:.5;cursor:not-allowed}
 input[type=file]{display:none}
+.add-feed{margin:4px 0 14px}
+.add-feed input{flex:1;min-width:240px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px 12px;font:inherit}
+.add-feed .notice{flex-basis:100%;margin:0}
 a{color:var(--accent)}
 .notice{color:var(--muted);font-size:13px}
 .download-link{display:inline-block;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);padding:7px 11px;text-decoration:none}
@@ -232,6 +235,11 @@ a{color:var(--accent)}
         <button class="primary" type="button" data-action="scan">Scan feeds</button>
       </div>
     </div>
+    <form id="addFeedForm" class="controls add-feed">
+      <input id="addFeedUrl" type="url" required aria-label="Feed or channel link" placeholder="Paste a podcast feed, YouTube channel or @handle, Apple Podcasts page, or show website">
+      <button id="addFeedButton" class="primary" type="submit">Subscribe</button>
+      <p class="notice">YouTube channels and playlists come in as feeds of their latest ~15 videos. For a one-off video or article, use + Add links on the Pick step instead.</p>
+    </form>
     <div id="subscriptionAiTools" class="controls subscription-batch" hidden>
       <label for="subscriptionBatchSize">Batch size</label>
       <input id="subscriptionBatchSize" type="number" min="1" value="10">
@@ -635,14 +643,14 @@ trayClear.addEventListener("click", async () => {
 
 function updatePickState(){
   const ready = Boolean(statusSnapshot?.candidates_ready);
+  // The list stays visible before the first scan so hand-added links can be used.
   pickEmpty.hidden = ready;
-  candidatesFrame.hidden = !ready;
   if(!ready){
     const hasSubscriptions = Boolean(statusSnapshot?.opml_exists);
-    pickEmptyTitle.textContent = hasSubscriptions ? "No episodes loaded yet" : "Start by importing your subscriptions";
+    pickEmptyTitle.textContent = hasSubscriptions ? "No episodes loaded yet" : "Start by adding your subscriptions";
     pickEmptyText.textContent = hasSubscriptions
-      ? "Scan your subscriptions to load every episode their feeds provide."
-      : "Export an OPML file from AntennaPod (or any podcast app), import it under Subscriptions, then scan it here.";
+      ? "Scan your subscriptions to load every episode their feeds provide, or use + Add links below for videos and web pages."
+      : "Subscribe to podcasts and YouTube channels under Subscriptions (or import an OPML file from AntennaPod or any podcast app), then scan them here. For one-off videos or web pages, use + Add links below.";
     pickEmptyScan.hidden = !hasSubscriptions;
   }
 }
@@ -1619,6 +1627,28 @@ document.getElementById("opmlFile").addEventListener("change", async event => {
     notify(`${mode === "merge" ? `Added ${result.added} new` : "Imported"} subscriptions; ${result.feeds} total in ${result.opml}. Scan your feeds to load their episodes.`, {action:{label:"Scan now", run:startScan}});
   }catch(error){ notify(`Could not import OPML: ${error.message}`, {kind:"error"}); }
   event.target.value = "";
+});
+
+document.getElementById("addFeedForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = document.getElementById("addFeedUrl");
+  const button = document.getElementById("addFeedButton");
+  button.disabled = true;
+  button.textContent = "Finding feed…";
+  try{
+    const result = await postJson("/api/subscriptions/add", {url:input.value.trim()});
+    input.value = "";
+    await Promise.all([refreshSubscriptions(), refreshStatus()]);
+    notify(result.added
+      ? `Subscribed to ${result.title}. Scan your feeds to load its episodes.`
+      : `${result.title} is already in your subscriptions.`,
+      result.added ? {action:{label:"Scan now", run:startScan}} : {});
+  }catch(error){
+    notify(`Could not subscribe: ${error.message}`, {kind:"error"});
+  }finally{
+    button.disabled = false;
+    button.textContent = "Subscribe";
+  }
 });
 
 /* ---------- History ---------- */

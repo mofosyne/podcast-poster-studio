@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import Request, urlopen
 
+import feed_discovery
 import link_preview
 from fetch_episodes import render_page
 from webapp import APP_HTML
@@ -1746,6 +1747,39 @@ def merge_opml(existing_data, incoming_data):
     return result, added
 
 
+def write_opml(config, opml_path, data):
+    """Replace the subscription list; the caller holds CONFIG_LOCK."""
+    opml_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = opml_path.with_name(f".{opml_path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes(data)
+    temporary.replace(opml_path)
+    if "opml_path" not in config:
+        config["opml_path"] = str(opml_path.relative_to(BASE_DIR))
+        atomic_write_json(CONFIG_PATH, config)
+
+
+def add_subscription(url):
+    """Subscribe to the feed behind a pasted podcast, YouTube, or website link."""
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Paste a podcast feed, YouTube channel, or website link.")
+    # Discovery fetches remote pages, so it runs before taking the config lock.
+    found = feed_discovery.discover_feed(url.strip())
+    root = ET.Element("opml", version="2.0")
+    ET.SubElement(ET.SubElement(root, "head"), "title").text = "Podcast Poster subscriptions"
+    ET.SubElement(_opml_body(root), "outline", type="rss", text=found["title"], title=found["title"], xmlUrl=found["feed_url"])
+    incoming = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    with CONFIG_LOCK:
+        config = load_config()
+        opml_path = project_path(config.get("opml_path", "user-data/subscriptions.opml"))
+        if opml_path.is_file():
+            merged, added = merge_opml(opml_path.read_bytes(), incoming)
+        else:
+            merged, added = incoming, 1
+        if added:
+            write_opml(config, opml_path, merged)
+    return {**found, "added": bool(added), "feeds": len(list_opml_subscriptions(merged))}
+
+
 def save_subscription_metadata(feed_url, channel_description, tags):
     if not isinstance(feed_url, str) or not feed_url.startswith(("https://", "http://")):
         raise ValueError("A valid subscription feed URL is required.")
@@ -1884,8 +1918,9 @@ class LocalHandler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
                 return self._send_bytes(page.encode("utf-8"), "text/html; charset=utf-8")
-            message = b"<!doctype html><p>Scan your subscriptions to build the episode list.</p>"
-            return self._send_bytes(message, "text/html; charset=utf-8")
+            # Before the first scan, still serve the list so hand-added links can be used.
+            page = render_page([], 0, 0, 0, "never")
+            return self._send_bytes(page.encode("utf-8"), "text/html; charset=utf-8")
         if path == "/api/subscriptions":
             try:
                 config = load_config()
@@ -2027,13 +2062,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                         merged_data, added_count = merge_opml(opml_path.read_bytes(), data)
                     else:
                         merged_data, added_count = data, incoming_count
-                    opml_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = opml_path.with_name(f".{opml_path.name}.{uuid.uuid4().hex}.tmp")
-                    temporary.write_bytes(merged_data)
-                    temporary.replace(opml_path)
-                    if "opml_path" not in config:
-                        config["opml_path"] = str(opml_path.relative_to(BASE_DIR))
-                        atomic_write_json(CONFIG_PATH, config)
+                    write_opml(config, opml_path, merged_data)
                 return self._send_json({
                     "feeds": len(list_opml_subscriptions(merged_data)),
                     "added": added_count if mode == "merge" else incoming_count,
@@ -2041,6 +2070,14 @@ class LocalHandler(BaseHTTPRequestHandler):
                     "mode": mode,
                 })
             except (OSError, ValueError, KeyError, ET.ParseError, json.JSONDecodeError) as error:
+                return self._send_error_json(error)
+        if path == "/api/subscriptions/add":
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict):
+                    raise TypeError("Expected a link to subscribe to.")
+                return self._send_json(add_subscription(payload.get("url")))
+            except (OSError, TypeError, ValueError, ET.ParseError, json.JSONDecodeError) as error:
                 return self._send_error_json(error)
         if path == "/api/llm/settings":
             try:

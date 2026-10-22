@@ -13,7 +13,7 @@ import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.error import URLError
-from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 from fetch_episodes import USER_AGENT, cache_artwork_image, format_duration
@@ -182,6 +182,19 @@ def clean_text(value, limit):
     return text[:cutoff].rstrip() + "…"
 
 
+def youtube_video_id(url):
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host == "youtu.be":
+        candidate = parts.path.strip("/").split("/")[0]
+    elif host.endswith("youtube.com"):
+        match = re.match(r"^/(?:shorts|live|embed)/([\w-]+)", parts.path)
+        candidate = match.group(1) if match else parse_qs(parts.query).get("v", [""])[0]
+    else:
+        return ""
+    return candidate if re.fullmatch(r"[\w-]{11}", candidate) else ""
+
+
 def oembed_endpoint(url, discovered):
     for pattern, endpoint in OEMBED_PROVIDERS:
         if pattern.search(url):
@@ -231,7 +244,8 @@ def resolve_link(url, artwork_dir, now=None):
         return next((value.strip() for value in values if isinstance(value, str) and value.strip()), "")
 
     title = text(oembed.get("title"), meta.get("og:title"), meta.get("twitter:title"), first_json_ld(blocks, "headline", "name"), page.title if page else "")
-    show = text(oembed.get("author_name"), first_json_ld(blocks, "author", "creator", "publisher"), meta.get("og:site_name"), oembed.get("provider_name"))
+    # The poster's "show" line names the channel or publication, not an article's byline.
+    show = text(oembed.get("author_name"), meta.get("og:site_name"), first_json_ld(blocks, "publisher"), first_json_ld(blocks, "author", "creator"), oembed.get("provider_name"))
     description = text(meta.get("og:description"), meta.get("twitter:description"), meta.get("description"), first_json_ld(blocks, "description"))
     published = parse_published(text(
         first_json_ld(blocks, "datePublished", "uploadDate"),
@@ -241,7 +255,12 @@ def resolve_link(url, artwork_dir, now=None):
         meta.get("og:video:release_date"),
     ))
     duration = format_duration(text(first_json_ld(blocks, "duration"), meta.get("duration"), meta.get("video:duration"), str(oembed.get("duration") or "")))
-    image_url = text(meta.get("og:image"), meta.get("og:image:url"), meta.get("twitter:image"), oembed.get("thumbnail_url"))
+    image_urls = [text(meta.get("og:image"), meta.get("og:image:url"), meta.get("twitter:image"))]
+    video_id = youtube_video_id(url)
+    if video_id:
+        # oEmbed's YouTube thumbnail is letterboxed; the full-size one is not (but is missing on some old videos).
+        image_urls.append(f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg")
+    image_urls.append(text(oembed.get("thumbnail_url")))
     author_url = http_url(oembed.get("author_url"))
 
     if title:
@@ -266,14 +285,13 @@ def resolve_link(url, artwork_dir, now=None):
     if tags:
         entry["tags"] = tags[:MAX_LINK_TAGS]
 
-    if image_url:
-        image_url = urljoin(page_url, image_url)
+    for image_url in dict.fromkeys(urljoin(page_url, image_url) for image_url in image_urls if image_url):
         digest = hashlib.sha256(image_url.encode()).hexdigest()
-        artwork_path, status = cache_artwork_image(image_url, artwork_dir / f"link-{digest}-v2.png")
+        artwork_path, _ = cache_artwork_image(image_url, artwork_dir / f"link-{digest}-v2.png")
         if artwork_path:
             entry["artwork_path"] = artwork_path
-        else:
-            warnings.append("artwork: image could not be downloaded")
+            break
+        warnings.append(f"artwork: could not download {image_url}")
 
     found_details = bool(title or oembed)
     entry["status"] = "ready" if found_details else "failed"
