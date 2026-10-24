@@ -39,12 +39,20 @@ SUMMARY = (
     "could borrow from the approach."
 )
 
+# A poster mixing media types: (show, title, media, duration) replacing the first slots.
+MIXED_ITEMS = [
+    ("Example: Climate Briefing", "Wetlands, birds and the farmers who changed their minds", "podcast", "38 min"),
+    ("Example: Street Level", "Riding a driverless metro across the whole city", "video", "16 min"),
+    ("Example: Field Notes Journal", "Ten small streets that show how a town can change", "article", ""),
+]
+
 EXAMPLES = [
-    ("single", "single", "dark", 1),
-    ("list-2", "list", "dark", 2),
-    ("list-3", "list", "dark", 3),
-    ("list-6", "list", "dark", 6),
-    ("list-3-ink-saving", "list", "ink-saving", 3),
+    ("single", "single", "dark", 1, False),
+    ("list-2", "list", "dark", 2, False),
+    ("list-3", "list", "dark", 3, False),
+    ("list-6", "list", "dark", 6, False),
+    ("list-3-ink-saving", "list", "ink-saving", 3, False),
+    ("list-3-mixed", "list", "dark", 3, True),
 ]
 
 
@@ -83,7 +91,11 @@ def main():
             }
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        for name, layout, theme, count in EXAMPLES:
+        for name, layout, theme, count, mixed in EXAMPLES:
+            slots = [slot(index) for index in range(count)]
+            if mixed:
+                for item, (show, title, media, duration) in zip(slots, MIXED_ITEMS):
+                    item.update({"show": show, "episode": title, "media": media, "duration": duration})
             pdf_path = root / f"{name}.pdf"
             config_path = root / f"{name}.json"
             config_path.write_text(json.dumps({
@@ -94,7 +106,7 @@ def main():
                 "poster_period": "month",
                 "poster_layout": layout,
                 "poster_theme": theme,
-                "slots": [slot(index) for index in range(count)],
+                "slots": slots,
             }), encoding="utf-8")
             subprocess.run(
                 [sys.executable, str(ROOT / "gen.py"), "--preview"],

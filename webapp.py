@@ -3,7 +3,7 @@ APP_HTML = r'''<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Podcast Poster Studio</title>
+<title>Poster Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111412'/%3E%3Cpath d='M9 22V10l14 6z' fill='%234fd1c5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -38,6 +38,24 @@ button.danger{color:var(--danger);border-color:#8e3c39}
 button.link-button{background:none;border:0;color:var(--accent);padding:0;text-decoration:underline;font:inherit}
 button:disabled{opacity:.5;cursor:not-allowed}
 input[type=file]{display:none}
+.header-add{white-space:nowrap}
+.subscription-section{margin:18px 0 4px}
+.added-feeds{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:10px 0 6px}
+.added-feed{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--panel-2);display:grid;gap:2px}
+.added-feed a{color:var(--accent);font-size:13px}
+.media-badge{display:inline-block;margin-right:8px;padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:var(--text);font-size:11px;font-weight:600;vertical-align:1px;white-space:nowrap}
+dialog.add-dialog{width:min(720px,calc(100vw - 32px));max-height:calc(100vh - 48px);background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:20px;box-shadow:0 18px 50px #000a}
+dialog.add-dialog::backdrop{background:#0009}
+.add-dialog h2{margin-bottom:4px}
+.add-dialog textarea{width:100%;min-height:96px;margin:12px 0 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:10px 12px;font:inherit;resize:vertical}
+.add-results{display:grid;gap:10px;margin:12px 0}
+.add-result{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--panel-2);display:grid;gap:6px}
+.add-result .add-url{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.add-result label{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.add-result select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 6px;font:inherit;font-size:13px}
+.add-result .add-error{color:var(--danger);font-size:13px}
+.add-result .add-already{color:var(--muted);font-size:13px}
+.dialog-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:6px}
 a{color:var(--accent)}
 .notice{color:var(--muted);font-size:13px}
 .download-link{display:inline-block;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);padding:7px 11px;text-decoration:none}
@@ -140,9 +158,9 @@ a{color:var(--accent)}
 <body>
 <header>
   <div class="header-row">
-    <a class="brand" href="#pick">Podcast Poster Studio</a>
+    <a class="brand" href="#pick">Poster Studio</a>
     <nav class="tab-nav" role="tablist" aria-label="Poster studio">
-      <button class="tab-button" id="pickTab" role="tab" aria-selected="false" aria-controls="pickPanel" data-tab="pick"><span class="step-number">1</span>Pick episodes <span class="tab-count" id="selectionCount">0/6</span></button>
+      <button class="tab-button" id="pickTab" role="tab" aria-selected="false" aria-controls="pickPanel" data-tab="pick"><span class="step-number">1</span>Pick <span class="tab-count" id="selectionCount">0/6</span></button>
       <span class="step-arrow" aria-hidden="true">›</span>
       <button class="tab-button" id="editTab" role="tab" aria-selected="false" aria-controls="editPanel" data-tab="edit"><span class="step-number">2</span>Edit text</button>
       <span class="step-arrow" aria-hidden="true">›</span>
@@ -152,6 +170,7 @@ a{color:var(--accent)}
       <button class="tab-button" id="historyTab" role="tab" aria-selected="false" aria-controls="historyPanel" data-tab="history">History</button>
       <button class="tab-button" id="settingsTab" role="tab" aria-selected="false" aria-controls="settingsPanel" data-tab="settings">Settings</button>
     </nav>
+    <button class="primary header-add" type="button" data-action="add" title="Follow a channel or feed, or add a single video, episode, or article">+ Add</button>
   </div>
 </header>
 <main>
@@ -162,27 +181,27 @@ a{color:var(--accent)}
 
   <section id="pickPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="pickTab" hidden>
     <div class="panel-head">
-      <div><h2>Pick episodes</h2><p class="notice">Tick up to six episodes for this poster. Picks are saved as you go, so reloading or rescanning keeps them.</p></div>
+      <div><h2>Pick</h2><p class="notice">Tick up to six episodes, videos, or articles for this poster; they can be mixed. Picks are saved as you go, so reloading or rescanning keeps them.</p></div>
       <div class="controls"><button type="button" data-action="scan">Rescan feeds</button></div>
     </div>
     <div id="pickEmpty" class="empty-state" hidden>
       <h3 id="pickEmptyTitle">No episodes yet</h3>
       <p id="pickEmptyText">Scan your subscriptions to load their episodes.</p>
-      <div class="controls"><button class="primary" type="button" data-action="scan" id="pickEmptyScan">Scan feeds</button><button type="button" data-go="subscriptions">Manage subscriptions</button></div>
+      <div class="controls"><button class="primary" type="button" data-action="add">+ Add</button><button type="button" data-action="scan" id="pickEmptyScan">Scan feeds</button><button type="button" data-go="subscriptions">Manage subscriptions</button></div>
     </div>
-    <iframe id="candidates" title="Podcast episodes" src="/candidates"></iframe>
+    <iframe id="candidates" title="Items to pick from" src="/candidates"></iframe>
   </section>
 
   <section id="editPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="editTab" hidden>
     <div class="panel-head">
-      <div><h2>Edit poster text</h2><p class="notice">The summary and tags below are printed under each episode. Edits save automatically; use ↑ ↓ to set the poster order.</p></div>
+      <div><h2>Edit poster text</h2><p class="notice">The summary and tags below are printed under each item. Edits save automatically; use ↑ ↓ to set the poster order.</p></div>
       <div id="saveState" class="save-state" aria-live="polite"></div>
     </div>
     <p id="editAiHint" class="notice" hidden>AI suggestions are off. <button type="button" class="link-button" data-go="settings">Connect a model in Settings</button> to draft summaries and tags.</p>
     <div id="editEmpty" class="empty-state" hidden>
-      <h3>No episodes on this poster yet</h3>
+      <h3>Nothing on this poster yet</h3>
       <p>Pick up to six episodes first; their text shows up here for editing.</p>
-      <div class="controls"><button class="primary" type="button" data-go="pick">Pick episodes</button></div>
+      <div class="controls"><button class="primary" type="button" data-go="pick">Pick</button></div>
     </div>
     <div id="editList" class="edit-list"></div>
   </section>
@@ -192,7 +211,7 @@ a{color:var(--accent)}
       <div><h2>Poster</h2><p class="notice" id="posterHint">Previewing never archives anything; only Generate &amp; archive adds the poster to History.</p></div>
       <div class="controls">
         <label class="layout-choice" for="posterLayout">Layout
-          <select id="posterLayout"><option value="list">List poster</option><option value="single">Single episode</option></select>
+          <select id="posterLayout"><option value="list">List poster</option><option value="single">Single item</option></select>
         </label>
         <label class="layout-choice" for="posterTheme">Theme
           <select id="posterTheme"><option value="dark">Dark</option><option value="ink-saving">White (ink-saving)</option></select>
@@ -213,7 +232,7 @@ a{color:var(--accent)}
     <div id="posterEmpty" class="empty-state" hidden>
       <h3>Nothing to print yet</h3>
       <p>Pick up to six episodes and they will appear here as a poster preview.</p>
-      <div class="controls"><button class="primary" type="button" data-go="pick">Pick episodes</button></div>
+      <div class="controls"><button class="primary" type="button" data-go="pick">Pick</button></div>
     </div>
     <div id="posterBody" class="preview-wrap">
       <iframe id="poster" title="Poster preview PDF" hidden></iframe>
@@ -225,13 +244,18 @@ a{color:var(--accent)}
     <div class="panel-head">
       <div><h2>Subscriptions</h2><p class="notice" id="subscriptionsStatus">Your subscriptions are stored locally in user-data. Import a list to start or maintain them.</p></div>
       <div class="controls">
+        <button class="primary" type="button" data-action="add">+ Add</button>
         <label class="upload" for="opmlFile">Import OPML…</label>
         <input id="opmlFile" type="file" accept=".opml,.xml,application/xml,text/xml">
         <select id="opmlImportMode" aria-label="Import mode"><option value="merge" selected>Merge (keep existing, add new)</option><option value="replace">Replace current list</option></select>
         <a id="exportSubscriptions" class="download-link" href="/api/subscriptions/download" hidden>Export OPML</a>
-        <button class="primary" type="button" data-action="scan">Scan feeds</button>
+        <button type="button" data-action="scan">Scan feeds</button>
       </div>
     </div>
+    <h3 class="subscription-section">Added by hand</h3>
+    <p class="notice">Single videos, episodes, and articles you add live in one feed per type, not in your OPML. Each is a standard RSS file any feed reader can follow.</p>
+    <div id="addedFeedList" class="added-feeds"></div>
+    <h3 class="subscription-section">Following</h3>
     <div id="subscriptionAiTools" class="controls subscription-batch" hidden>
       <label for="subscriptionBatchSize">Batch size</label>
       <input id="subscriptionBatchSize" type="number" min="1" value="10">
@@ -280,18 +304,47 @@ a{color:var(--accent)}
   <div class="tray-inner">
     <div class="tray-summary">
       <div id="trayThumbs" class="tray-thumbs" aria-hidden="true"></div>
-      <div><strong id="trayCount">No episodes on this poster yet</strong><div class="notice tray-hint" id="trayHint">Tick episodes to add them.</div></div>
+      <div><strong id="trayCount">Nothing on this poster yet</strong><div class="notice tray-hint" id="trayHint">Tick items to add them.</div></div>
     </div>
     <div class="controls">
       <button id="trayClear" type="button" hidden>Clear</button>
-      <button id="trayBack" type="button" data-go="pick" hidden>← Pick episodes</button>
+      <button id="trayBack" type="button" data-go="pick" hidden>← Pick</button>
       <button id="trayNext" class="primary" type="button" data-go="edit" disabled>Edit text →</button>
     </div>
   </div>
 </div>
 <div id="toasts" class="toasts" aria-live="polite"></div>
+<dialog id="addDialog" class="add-dialog" aria-labelledby="addTitle">
+  <h2 id="addTitle">Add</h2>
+  <p class="notice">Paste one or more links, one per line. <strong>Follow</strong> a YouTube channel, podcast, or blog to get its new items each time you scan, or <strong>add</strong> a single video, episode, or article.</p>
+  <textarea id="addText" aria-label="Links to add" placeholder="https://www.youtube.com/@NotJustBikes&#10;https://www.youtube.com/watch?v=…&#10;https://podcasts.apple.com/…&#10;https://example.com/blog/a-good-post"></textarea>
+  <div class="controls"><button id="addCheck" class="primary" type="button">Check links</button><span class="notice" id="addStatus" aria-live="polite">Nothing is added until you confirm.</span></div>
+  <div id="addResults" class="add-results"></div>
+  <div class="dialog-actions"><button id="addCancel" type="button">Cancel</button><button id="addConfirm" class="primary" type="button" disabled>Add</button></div>
+</dialog>
 <script>
 const TABS = ["pick", "edit", "poster", "subscriptions", "history", "settings"];
+// Mirrors media_type_for() in fetch_episodes.py.
+const MEDIA_INFO = {
+  podcast:{icon:"🎧", label:"Podcast", feed:"Added episodes"},
+  video:{icon:"▶", label:"Video", feed:"Added videos"},
+  article:{icon:"📰", label:"Article", feed:"Added articles"},
+};
+const VIDEO_HOST = /(^|\.)(youtube\.com|youtu\.be|vimeo\.com)$/i;
+function mediaOfSlot(slot){
+  if(MEDIA_INFO[slot.media]) return slot.media;
+  try{
+    return VIDEO_HOST.test(new URL(slot.feed_url || slot.url).hostname) ? "video" : "podcast";
+  }catch(error){
+    return "podcast";
+  }
+}
+function mediaBadge(media){
+  const badge = document.createElement("span");
+  badge.className = "media-badge";
+  badge.textContent = `${MEDIA_INFO[media].icon} ${MEDIA_INFO[media].label}`;
+  return badge;
+}
 const MAX_SLOTS = 6;
 const candidatesFrame = document.getElementById("candidates");
 const pickEmpty = document.getElementById("pickEmpty");
@@ -511,6 +564,7 @@ document.addEventListener("click", event => {
   if(!target || target.disabled) return;
   if(target.dataset.go) navigate(target.dataset.go);
   if(target.dataset.action === "scan") startScan();
+  if(target.dataset.action === "add") openAddDialog();
 });
 
 /* ---------- Poster draft ---------- */
@@ -593,11 +647,11 @@ function renderTray(){
     thumbs.push(empty);
   }
   trayThumbs.replaceChildren(...thumbs);
-  trayCount.textContent = count ? `${count} of ${MAX_SLOTS} episodes on this poster` : "No episodes on this poster yet";
+  trayCount.textContent = count ? `${count} of ${MAX_SLOTS} places filled on this poster` : "Nothing on this poster yet";
   if(activeTab === "pick"){
     trayHint.textContent = count >= MAX_SLOTS
-      ? "The poster is full. Untick an episode to swap it out."
-      : "Tick episodes to add them. Picks are saved as you go.";
+      ? "The poster is full. Untick one to swap it out."
+      : "Tick items to add them. Picks are saved as you go.";
     trayClear.hidden = count === 0;
     trayBack.hidden = true;
     trayNext.textContent = "Edit text →";
@@ -627,7 +681,7 @@ trayClear.addEventListener("click", async () => {
   if(!saved.length) return;
   try{
     await mutateDraft("/api/draft/clear", {});
-    notify(`Cleared ${plural(saved.length, "episode")} from this poster.`, {action:{label:"Undo", run:() => restoreDraft(saved)}});
+    notify(`Cleared ${plural(saved.length, "item")} from this poster.`, {action:{label:"Undo", run:() => restoreDraft(saved)}});
   }catch(error){ /* reported */ }
 });
 
@@ -635,14 +689,14 @@ trayClear.addEventListener("click", async () => {
 
 function updatePickState(){
   const ready = Boolean(statusSnapshot?.candidates_ready);
+  // The list stays visible before the first scan so hand-added links can be used.
   pickEmpty.hidden = ready;
-  candidatesFrame.hidden = !ready;
   if(!ready){
     const hasSubscriptions = Boolean(statusSnapshot?.opml_exists);
-    pickEmptyTitle.textContent = hasSubscriptions ? "No episodes loaded yet" : "Start by importing your subscriptions";
+    pickEmptyTitle.textContent = hasSubscriptions ? "Nothing scanned yet" : "Start by adding something to pick from";
     pickEmptyText.textContent = hasSubscriptions
-      ? "Scan your subscriptions to load every episode their feeds provide."
-      : "Export an OPML file from AntennaPod (or any podcast app), import it under Subscriptions, then scan it here.";
+      ? "Scan your subscriptions to load every episode, video, and article their feeds provide. Single items you add appear below straight away."
+      : "Use + Add to follow a YouTube channel, podcast, or blog (or import an OPML file under Subscriptions), then scan. Single videos, episodes, and articles you add appear below straight away.";
     pickEmptyScan.hidden = !hasSubscriptions;
   }
 }
@@ -703,6 +757,11 @@ window.addEventListener("message", event => {
     mutateDraft("/api/draft/add", {slot:data.slot}, {syncFrame:false}).catch(() => {});
   } else if(data.type === "draft-remove" && typeof data.key === "string"){
     mutateDraft("/api/draft/remove", {key:data.key}, {syncFrame:false}).catch(() => {});
+  } else if(data.type === "open-add"){
+    openAddDialog();
+  } else if(data.type === "draft-refresh"){
+    // A hand-added link's details arrived after it was picked.
+    loadDraft({syncFrame:false}).catch(() => {});
   } else if(data.type === "toast"){
     notify(String(data.message || ""));
   } else if(data.type === "frame-height"){
@@ -853,6 +912,7 @@ function buildEditCard(entry){
   const meta = document.createElement("div");
   meta.className = "edit-meta";
   meta.textContent = [slot.date, slot.duration].filter(Boolean).join(" · ");
+  meta.prepend(mediaBadge(mediaOfSlot(slot)));
   heading.append(show, title, meta);
   if(entry.previously_posted){
     const note = document.createElement("div");
@@ -901,7 +961,7 @@ function buildEditCard(entry){
   const textarea = document.createElement("textarea");
   textarea.maxLength = 400;
   textarea.value = slot.summary || "";
-  textarea.placeholder = "A sentence or two on why this episode is worth a listen.";
+  textarea.placeholder = "A sentence or two on why this is worth someone's time.";
   summaryField.append(textarea);
   const summaryFoot = document.createElement("div");
   summaryFoot.className = "field-foot";
@@ -1074,8 +1134,8 @@ function renderPosterState(){
   posterHint.textContent = !count
     ? "Previewing never archives anything; only Generate & archive adds the poster to History."
     : archived
-      ? `${plural(count, "episode")}. This version is archived; any change makes a new version you can archive.`
-      : `${plural(count, "episode")}. This is a preview; nothing is archived until you choose Generate & archive.`;
+      ? `${plural(count, "item")}. This version is archived; any change makes a new version you can archive.`
+      : `${plural(count, "item")}. This is a preview; nothing is archived until you choose Generate & archive.`;
 }
 
 // Only one render runs at a time (the server allows one); changes made meanwhile
@@ -1146,7 +1206,7 @@ async function generatePoster(){
 
 async function startNewPoster(){
   const count = draftSlots.length;
-  if(count && !draftDetails?.archived && !window.confirm(`Clear all ${plural(count, "episode")} and their edited text? This poster has not been archived.`)) return;
+  if(count && !draftDetails?.archived && !window.confirm(`Clear all ${plural(count, "item")} and their edited text? This poster has not been archived.`)) return;
   try{
     await mutateDraft("/api/draft/clear", {});
     previewFingerprint = null;
@@ -1484,20 +1544,43 @@ async function processMissingSubscriptions(){
   }
 }
 
+function renderAddedFeeds(feeds){
+  const list = document.getElementById("addedFeedList");
+  list.replaceChildren();
+  for(const feed of feeds){
+    const card = document.createElement("div");
+    card.className = "added-feed";
+    const title = document.createElement("strong");
+    title.append(mediaBadge(feed.media), feed.title);
+    const count = document.createElement("span");
+    count.className = "notice";
+    count.textContent = plural(feed.count, "item");
+    const link = document.createElement("a");
+    link.href = feed.url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "RSS feed";
+    link.title = "Follow this in any feed reader on this computer";
+    card.append(title, count, link);
+    list.append(card);
+  }
+}
+
 async function refreshSubscriptions(){
   const data = await requestJson("/api/subscriptions");
   currentSubscriptionFeeds = Array.isArray(data.feeds) ? data.feeds : [];
   updateSubscriptionBatchControls();
   syncCandidateChannelMetadata(currentSubscriptionFeeds);
   subscriptionList.replaceChildren();
+  renderAddedFeeds(Array.isArray(data.added_feeds) ? data.added_feeds : []);
   exportSubscriptions.hidden = !data.exists;
   subscriptionsStatus.textContent = data.exists
-    ? `${plural(data.feeds.length, "subscription")} in ${data.opml}. Import another OPML file to merge or replace this list, then scan feeds for new episodes.`
-    : "No subscriptions yet. Import an OPML export from your podcast app to get started.";
+    ? `Following ${plural(data.feeds.length, "feed")} in ${data.opml}. Use + Add to follow more, or import another OPML file to merge or replace this list.`
+    : "Not following anything yet. Use + Add to follow a YouTube channel, podcast, or blog, or import an OPML export from your podcast app.";
   if(!data.feeds.length){
     const empty = document.createElement("p");
     empty.className = "notice";
-    empty.textContent = "No podcast feeds found.";
+    empty.textContent = "No feeds followed yet.";
     subscriptionList.append(empty);
     return;
   }
@@ -1513,10 +1596,11 @@ async function refreshSubscriptions(){
       thumbnail.decoding = "async";
     }else{
       thumbnail.setAttribute("aria-hidden", "true");
-      thumbnail.textContent = "♫";
+      thumbnail.textContent = {video:"▶", article:"📰"}[feed.media] || "♫";
     }
     const title = document.createElement("strong");
-    title.textContent = feed.groups.length ? `${feed.groups.join(" / ")} · ${feed.title}` : feed.title;
+    if(MEDIA_INFO[feed.media]) title.append(mediaBadge(feed.media));
+    title.append(feed.groups.length ? `${feed.groups.join(" / ")} · ${feed.title}` : feed.title);
     const url = document.createElement("span");
     url.className = "notice";
     url.textContent = feed.url;
@@ -1618,6 +1702,172 @@ document.getElementById("opmlFile").addEventListener("change", async event => {
   event.target.value = "";
 });
 
+/* ---------- + Add ---------- */
+
+// One place to add anything: follow a channel or feed (it goes in the OPML and is
+// scanned) or add a single item (it goes in that media type's added feed).
+const addDialog = document.getElementById("addDialog");
+const addText = document.getElementById("addText");
+const addCheck = document.getElementById("addCheck");
+const addStatus = document.getElementById("addStatus");
+const addResults = document.getElementById("addResults");
+const addConfirm = document.getElementById("addConfirm");
+let addRows = [];
+
+function openAddDialog(){
+  addText.value = "";
+  addRows = [];
+  addResults.replaceChildren();
+  addStatus.textContent = "Nothing is added until you confirm.";
+  updateAddConfirm();
+  addDialog.showModal();
+  addText.focus();
+}
+
+function updateAddConfirm(){
+  const count = addRows.filter(row => row.addItem || row.follow).length;
+  addConfirm.disabled = count === 0;
+  addConfirm.textContent = count ? `Add (${count})` : "Add";
+}
+
+function addCheckbox(checked, onChange){
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = checked;
+  box.addEventListener("change", () => { onChange(box.checked); updateAddConfirm(); });
+  return box;
+}
+
+function renderAddRows(){
+  addResults.replaceChildren();
+  for(const row of addRows){
+    const result = row.result;
+    const card = document.createElement("div");
+    card.className = "add-result";
+    const url = document.createElement("div");
+    url.className = "add-url";
+    url.textContent = result.url || "";
+    card.append(url);
+    if(result.item){
+      if(result.item.already){
+        const note = document.createElement("div");
+        note.className = "add-already";
+        note.textContent = `Already in ${MEDIA_INFO[result.item.already].feed}.`;
+        card.append(note);
+      }else{
+        const label = document.createElement("label");
+        const type = document.createElement("select");
+        type.setAttribute("aria-label", "Media type");
+        for(const [value, info] of Object.entries(MEDIA_INFO)){
+          type.append(new Option(`${info.icon} ${info.label.toLowerCase()}`, value, false, value === row.media));
+        }
+        type.addEventListener("change", () => { row.media = type.value; });
+        label.append(addCheckbox(row.addItem, checked => { row.addItem = checked; }), "Add this", type);
+        if(result.item.title){
+          const title = document.createElement("strong");
+          title.textContent = result.item.title;
+          label.append(title);
+        }
+        card.append(label);
+      }
+    }
+    if(result.follow){
+      const follow = result.follow;
+      const info = MEDIA_INFO[follow.media];
+      if(follow.already){
+        const note = document.createElement("div");
+        note.className = "add-already";
+        note.textContent = `Already following ${follow.title}.`;
+        card.append(note);
+      }else{
+        const label = document.createElement("label");
+        const title = document.createElement("strong");
+        title.textContent = follow.title;
+        label.append(addCheckbox(row.follow, checked => { row.follow = checked; }), "Follow", title);
+        if(info) label.append(mediaBadge(follow.media));
+        card.append(label);
+      }
+    }
+    if(result.error){
+      const error = document.createElement("div");
+      error.className = "add-error";
+      error.textContent = result.error;
+      card.append(error);
+    }
+    addResults.append(card);
+  }
+  updateAddConfirm();
+}
+
+async function checkAddLinks(){
+  const text = addText.value.trim();
+  if(!text) return;
+  addCheck.disabled = true;
+  addStatus.textContent = "Checking links…";
+  try{
+    const data = await postJson("/api/add/inspect", {text});
+    addRows = data.results.map(result => ({
+      result,
+      media:result.item?.media || "article",
+      addItem:Boolean(result.item && !result.item.already && result.default === "item"),
+      follow:Boolean(result.follow && !result.follow.already && result.default === "follow"),
+    }));
+    renderAddRows();
+    addStatus.textContent = addRows.some(row => row.addItem || row.follow)
+      ? "Check what to add, then confirm."
+      : "Nothing new to add from those links.";
+  }catch(error){
+    addStatus.textContent = error.message;
+  }finally{
+    addCheck.disabled = false;
+  }
+}
+
+async function confirmAdd(){
+  const rows = addRows.filter(row => row.addItem || row.follow).map(row => ({
+    url:row.result.url,
+    item:row.addItem,
+    media:row.media,
+    // A feed the preview already found is used as is; a channel page is looked up again.
+    follow:row.follow ? {url:row.result.follow.feed_url || row.result.follow.url, title:row.result.follow.feed_url ? row.result.follow.title : null} : null,
+  }));
+  if(!rows.length) return;
+  addConfirm.disabled = true;
+  addStatus.textContent = "Adding…";
+  try{
+    const result = await postJson("/api/add", {rows});
+    addDialog.close();
+    const added = result.added.length;
+    const followed = result.followed;
+    const errors = result.results.filter(row => row.error);
+    const parts = [];
+    if(added) parts.push(`added ${plural(added, "item")}`);
+    if(followed) parts.push(`following ${plural(followed, "new feed")}`);
+    if(parts.length){
+      const message = parts.join(" and ");
+      notify(`${message[0].toUpperCase()}${message.slice(1)}.${followed ? " Scanning feeds now." : ""}`);
+    }
+    for(const row of errors) notify(`${row.url}: ${row.error}`, {kind:"error"});
+    candidatesFrame.contentWindow?.postMessage({type:"refresh-added", reveal:added > 0}, location.origin);
+    if(added && activeTab !== "pick") navigate("pick");
+    if(followed){
+      refreshSubscriptions().catch(() => {});
+      refreshStatus().catch(() => {});
+      startScan();
+    }
+  }catch(error){
+    addStatus.textContent = error.message;
+    updateAddConfirm();
+  }
+}
+
+addCheck.addEventListener("click", checkAddLinks);
+addConfirm.addEventListener("click", confirmAdd);
+document.getElementById("addCancel").addEventListener("click", () => addDialog.close());
+addText.addEventListener("keydown", event => {
+  if(event.key === "Enter" && (event.ctrlKey || event.metaKey)) checkAddLinks();
+});
+
 /* ---------- History ---------- */
 
 async function refreshHistory(){
@@ -1640,7 +1890,7 @@ async function refreshHistory(){
     const row = document.createElement("div");
     row.className = "history-row";
     const title = document.createElement("strong");
-    const layout = record.layout === "single" ? "Single episode" : "List";
+    const layout = record.layout === "single" ? "Single item" : "List";
     title.textContent = `${layout} · ${record.edition || record.title || "Poster"}`;
     const generated = document.createElement("span");
     generated.className = "history-meta";
@@ -1712,7 +1962,7 @@ async function refreshHistory(){
     });
     const layoutSelect = document.createElement("select");
     layoutSelect.title = "Change this archived poster's layout.";
-    layoutSelect.innerHTML = '<option value="list">List poster</option><option value="single">Single episode</option>';
+    layoutSelect.innerHTML = '<option value="list">List poster</option><option value="single">Single item</option>';
     layoutSelect.value = record.layout === "single" ? "single" : "list";
     layoutSelect.querySelector('option[value="single"]').disabled = episodeCount !== 1;
     const themeSelect = document.createElement("select");

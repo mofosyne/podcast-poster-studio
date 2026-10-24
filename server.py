@@ -17,7 +17,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import Request, urlopen
 
-from fetch_episodes import render_page
+import added_feeds
+import feed_discovery
+import link_preview
+from fetch_episodes import MEDIA_TYPES, is_video_url, media_type_for, render_page
 from webapp import APP_HTML
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -616,7 +619,7 @@ def atomic_write_text(path, text):
 
 
 def upgrade_candidate_html(page, candidate_path=None):
-    if 'data-page-version="20"' in page:
+    if 'data-page-version="22"' in page:
         return None
     episode_marker = "const EPISODES = "
     episode_start = page.find(episode_marker)
@@ -655,7 +658,7 @@ def upgrade_candidate_html(page, candidate_path=None):
                 episode.setdefault("channel_artwork_path", cached_path)
 
     status_match = re.search(
-        r'<div class="status">\d+ episodes from (\d+) feeds · \d+ previously posted · generated (.*?) · (\d+) cached feeds, (\d+) unavailable</div>',
+        r'<div class="status">\d+ (?:episodes|items) from (\d+) feeds · \d+ previously posted · generated (.*?) · (\d+) cached feeds, (\d+) unavailable</div>',
         page,
     )
     if status_match:
@@ -725,6 +728,7 @@ def clean_slot(slot, index=1):
         raise ValueError(f"Summary {index} must be text of at most 400 characters.")
     cleaned_slot = {key: slot[key].strip() for key in required}
     cleaned_slot["type"] = "fixed"
+    cleaned_slot["media"] = validate_media_type(slot["media"]) if "media" in slot else media_type_for(cleaned_slot)
     if summary.strip():
         cleaned_slot["summary"] = summary.strip()
     channel_description = slot.get("channel_description", "")
@@ -751,6 +755,18 @@ def clean_slot(slot, index=1):
             raise ValueError(f"Artwork path {index} is outside the local artwork cache or does not exist.")
         cleaned_slot["artwork_path"] = resolved_artwork.relative_to(BASE_DIR).as_posix()
     return cleaned_slot
+
+
+def validate_media_type(media):
+    if media not in MEDIA_TYPES:
+        raise ValueError('Media type must be "podcast", "video", or "article".')
+    return media
+
+
+def poster_media(slots):
+    """"podcast", "video", or "article" for a single-type poster; "mixed" when it combines them."""
+    kinds = {media_type_for(slot) for slot in slots if isinstance(slot, dict)}
+    return kinds.pop() if len(kinds) == 1 else "mixed" if kinds else None
 
 
 def validate_slots(slots, layout="list"):
@@ -786,6 +802,7 @@ def validate_shortlist_entry(entry):
     if not isinstance(summary, str) or len(summary) > 400:
         raise ValueError("Shortlist summary must be text of at most 400 characters.")
     cleaned = {key: entry[key].strip() for key in required}
+    cleaned["media"] = validate_media_type(entry["media"]) if "media" in entry else media_type_for(cleaned)
     if summary.strip():
         cleaned["summary"] = summary.strip()
     channel_description = entry.get("channel_description", "")
@@ -879,6 +896,215 @@ def drop_archived_from_shortlist(slots):
         if len(remaining) != len(shortlist):
             config["shortlist"] = remaining
             atomic_write_json(CONFIG_PATH, config)
+
+
+# Hand-added items: single videos, episodes, and articles you paste in. They are
+# not subscriptions, so they live in one RSS feed per media type under
+# user-data/feeds/ rather than in the OPML (see added_feeds.py). An item is saved
+# bare the moment it is added and its details are fetched afterwards, so it can be
+# shortlisted or picked before (or without) them.
+ADDED_LOCK = threading.Lock()
+# Details a fetch may fill in on shortlist and poster copies made before it finished.
+ITEM_DETAIL_FIELDS = ("show", "episode", "date", "feed_url", "duration", "artwork_path")
+MAX_ADD_LINKS = 20
+
+
+def added_dir():
+    return USER_DATA_DIR / "feeds"
+
+
+def migrate_config_links():
+    """Move items saved as config.json "links" by earlier builds into the added feeds."""
+    with CONFIG_LOCK:
+        config = load_config()
+        links = config.pop("links", None)
+        if links is None:
+            return
+        with ADDED_LOCK:
+            for link in links if isinstance(links, list) else []:
+                url = link_preview.http_url(link.get("url")) if isinstance(link, dict) else ""
+                if not url:
+                    continue
+                media = link.get("media") if link.get("media") in MEDIA_TYPES else "video" if is_video_url(url) else "article"
+                if added_feeds.add(added_dir(), [url], media):
+                    added_feeds.update(added_dir(), url, {key: value for key, value in link.items() if key not in {"url", "media"}})
+        atomic_write_json(CONFIG_PATH, config)
+
+
+def get_added():
+    migrate_config_links()
+    with ADDED_LOCK:
+        return added_feeds.read_all(added_dir())
+
+
+def added_feed_summaries(items=None):
+    items = get_added() if items is None else items
+    return [
+        {
+            "media": media,
+            "title": added_feeds.FEED_TITLES[media],
+            "count": sum(item["media"] == media for item in items),
+            "url": f"/feeds/{added_feeds.FEED_FILES[media]}",
+        }
+        for media in MEDIA_TYPES
+    ]
+
+
+def remove_added(url):
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("An item URL is required.")
+    with ADDED_LOCK:
+        added_feeds.remove(added_dir(), url)
+        return added_feeds.read_all(added_dir())
+
+
+def refresh_item_copies(entries, item, previous):
+    """Fill fetched details into shortlist or poster copies of an added item.
+
+    A field is replaced only while it still holds the placeholder the copy was made
+    with; summaries and tags are only added where the copy has none, so user edits
+    stay. The media type always follows the item.
+    """
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("url") != item["url"]:
+            continue
+        for key in ITEM_DETAIL_FIELDS:
+            if key in item and entry.get(key, previous.get(key)) == previous.get(key) and entry.get(key) != item[key]:
+                entry[key] = item[key]
+                changed = True
+        for key in ("summary", "tags"):
+            if item.get(key) and not entry.get(key):
+                entry[key] = item[key]
+                changed = True
+        if entry.get("media") != item["media"]:
+            entry["media"] = item["media"]
+            changed = True
+    return changed
+
+
+def refresh_saved_copies(item, previous):
+    with CONFIG_LOCK:
+        config = load_config()
+        shortlist = get_shortlist(config)
+        shortlist_changed = refresh_item_copies(shortlist, item, previous)
+        slots = get_draft_slots(config)
+        draft_changed = refresh_item_copies(slots, item, previous)
+        if shortlist_changed:
+            config["shortlist"] = shortlist
+        if draft_changed:
+            config["slots"] = slots
+        if shortlist_changed or draft_changed:
+            atomic_write_json(CONFIG_PATH, config)
+    return shortlist_changed, draft_changed
+
+
+def move_added(url, media):
+    """Change an item's media type, which moves it to that type's feed."""
+    media = validate_media_type(media)
+    with ADDED_LOCK:
+        previous = added_feeds.find(added_dir(), url)
+        if previous is None:
+            raise ValueError("That item is not in your added items.")
+        item = added_feeds.move(added_dir(), url, media)
+        items = added_feeds.read_all(added_dir())
+    shortlist_changed, draft_changed = refresh_saved_copies(item, previous)
+    return {"items": items, "item": item, "shortlist_changed": shortlist_changed, "draft_changed": draft_changed}
+
+
+def fetch_added_details(url):
+    with ADDED_LOCK:
+        stored = added_feeds.find(added_dir(), url)
+    if stored is None:
+        raise ValueError("That item is not in your added items.")
+    artwork_dir = USER_DATA_DIR / "cache" / "artwork"
+    # Fetched outside the locks: pages can be slow and other edits should not wait.
+    resolved, _ = link_preview.resolve_link(url, artwork_dir)
+    if isinstance(resolved.get("artwork_path"), Path):
+        resolved["artwork_path"] = resolved["artwork_path"].resolve().relative_to(BASE_DIR.resolve()).as_posix()
+
+    with ADDED_LOCK:
+        previous = added_feeds.find(added_dir(), url)
+        if previous is None:
+            raise ValueError("That item was removed while its details were being fetched.")
+        if resolved["status"] == "failed":
+            details = {**previous, "status": "failed", "error": resolved.get("error", "")}
+        else:
+            details = {key: value for key, value in resolved.items() if key not in {"error", "date", "summary", "duration"}}
+        item = added_feeds.update(added_dir(), url, details)
+        items = added_feeds.read_all(added_dir())
+    shortlist_changed, draft_changed = refresh_saved_copies(item, previous)
+    return {"items": items, "item": item, "shortlist_changed": shortlist_changed, "draft_changed": draft_changed}
+
+
+def split_links(text):
+    if not isinstance(text, str):
+        raise TypeError("Expected links as text.")
+    urls = list(dict.fromkeys(text.split()))
+    if not urls:
+        raise ValueError("Paste at least one link.")
+    if len(urls) > MAX_ADD_LINKS:
+        raise ValueError(f"Check at most {MAX_ADD_LINKS} links at a time.")
+    return urls
+
+
+def inspect_links(text):
+    """Preview what each pasted link would add: a single item, a feed to follow, or both."""
+    with ADDED_LOCK:
+        added = {item["url"]: item["media"] for item in added_feeds.read_all(added_dir())}
+    config = load_config()
+    opml_path = project_path(config.get("opml_path", "user-data/subscriptions.opml"))
+    followed = {item["url"] for item in list_opml_subscriptions(opml_path.read_bytes())} if opml_path.is_file() else set()
+    results = []
+    for url in split_links(text):
+        result = feed_discovery.inspect_link(url)
+        if result["item"] and result["url"] in added:
+            result["item"]["already"] = added[result["url"]]
+        follow = result["follow"]
+        if follow and follow.get("feed_url") in followed:
+            follow["already"] = True
+        results.append(result)
+    return {"results": results}
+
+
+def add_from_links(rows):
+    """Add the items and follow the feeds chosen in the + Add preview."""
+    if not isinstance(rows, list) or not rows or len(rows) > MAX_ADD_LINKS:
+        raise ValueError(f"Choose between 1 and {MAX_ADD_LINKS} links to add.")
+    results = []
+    new_items = {media: [] for media in MEDIA_TYPES}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TypeError("Each link to add must be an object.")
+        result = {"url": row.get("url"), "item": None, "follow": None, "error": ""}
+        url = link_preview.http_url(row.get("url"))
+        if row.get("item"):
+            if not url:
+                result["error"] = "Not a web link."
+            else:
+                new_items[validate_media_type(row.get("media"))].append(url)
+                result["item"] = {"media": row["media"]}
+        follow = row.get("follow")
+        if isinstance(follow, dict) and not result["error"]:
+            try:
+                result["follow"] = add_subscription(follow.get("url"), follow.get("title"))
+            except ValueError as error:
+                result["error"] = str(error)
+        results.append(result)
+    added = []
+    with ADDED_LOCK:
+        for media, urls in new_items.items():
+            added += added_feeds.add(added_dir(), urls, media)
+        items = added_feeds.read_all(added_dir())
+    for result in results:
+        if result["item"]:
+            result["item"]["added"] = result["url"] in added
+    return {
+        "results": results,
+        "items": items,
+        "added": added,
+        "followed": sum(bool(result["follow"] and result["follow"]["added"]) for result in results),
+    }
 
 
 # The poster draft is the working selection: config["slots"], edited in place by
@@ -1055,6 +1281,8 @@ def get_draft():
         for episode in load_candidate_episodes(candidate_path):
             if isinstance(episode.get("url"), str):
                 episodes_by_url.setdefault(episode["url"], episode)
+        for item in get_added():
+            episodes_by_url.setdefault(item["url"], item)
     try:
         suggestions = load_llm_suggestions() if slots else {}
     except (OSError, ValueError, json.JSONDecodeError):
@@ -1097,6 +1325,7 @@ def get_draft():
         "max_slots": MAX_POSTER_SLOTS,
         "layout": layout,
         "theme": theme,
+        "media": poster_media(slots),
         "archived": archived,
         "llm_suggestion_version": LLM_SUGGESTION_VERSION,
     }
@@ -1557,6 +1786,7 @@ def subscription_candidate_context(episodes, feed_url):
         "feed_description": feed_description,
         "artwork_path": artwork_path,
         "recent_episodes": recent_episodes,
+        "media": next((episode["media"] for episode in matching if episode.get("media") in MEDIA_TYPES), None),
     }
 
 
@@ -1614,6 +1844,46 @@ def merge_opml(existing_data, incoming_data):
     if len(result) > MAX_OPML_BYTES:
         raise ValueError("Merged OPML would exceed the 5 MB limit.")
     return result, added
+
+
+def write_opml(config, opml_path, data):
+    """Replace the subscription list; the caller holds CONFIG_LOCK."""
+    opml_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = opml_path.with_name(f".{opml_path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes(data)
+    temporary.replace(opml_path)
+    if "opml_path" not in config:
+        config["opml_path"] = str(opml_path.relative_to(BASE_DIR))
+        atomic_write_json(CONFIG_PATH, config)
+
+
+def add_subscription(url, title=None):
+    """Subscribe to the feed behind a pasted podcast, YouTube, or website link.
+
+    A feed URL and title already found by the + Add preview are used as they are;
+    anything else is looked up first.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Paste a podcast feed, YouTube channel, or website link.")
+    if isinstance(title, str) and title.strip() and link_preview.http_url(url):
+        found = {"feed_url": url.strip(), "title": title.strip()[:200]}
+    else:
+        # Discovery fetches remote pages, so it runs before taking the config lock.
+        found = feed_discovery.discover_feed(url.strip())
+    root = ET.Element("opml", version="2.0")
+    ET.SubElement(ET.SubElement(root, "head"), "title").text = "Podcast Poster subscriptions"
+    ET.SubElement(_opml_body(root), "outline", type="rss", text=found["title"], title=found["title"], xmlUrl=found["feed_url"])
+    incoming = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    with CONFIG_LOCK:
+        config = load_config()
+        opml_path = project_path(config.get("opml_path", "user-data/subscriptions.opml"))
+        if opml_path.is_file():
+            merged, added = merge_opml(opml_path.read_bytes(), incoming)
+        else:
+            merged, added = incoming, 1
+        if added:
+            write_opml(config, opml_path, merged)
+    return {**found, "added": bool(added), "feeds": len(list_opml_subscriptions(merged))}
 
 
 def save_subscription_metadata(feed_url, channel_description, tags):
@@ -1754,8 +2024,9 @@ class LocalHandler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
                 return self._send_bytes(page.encode("utf-8"), "text/html; charset=utf-8")
-            message = b"<!doctype html><p>Scan your subscriptions to build the episode list.</p>"
-            return self._send_bytes(message, "text/html; charset=utf-8")
+            # Before the first scan, still serve the list so hand-added links can be used.
+            page = render_page([], 0, 0, 0, "never")
+            return self._send_bytes(page.encode("utf-8"), "text/html; charset=utf-8")
         if path == "/api/subscriptions":
             try:
                 config = load_config()
@@ -1770,13 +2041,15 @@ class LocalHandler(BaseHTTPRequestHandler):
                 for subscription in subscriptions:
                     candidate_context = subscription_candidate_context(candidate_episodes, subscription["url"])
                     subscription["artwork_url"] = cached_artwork_url(candidate_context["artwork_path"])
+                    # Known once scanned; before that only a video host gives it away.
+                    subscription["media"] = candidate_context["media"] or ("video" if is_video_url(subscription["url"]) else None)
                     saved = metadata.get(subscription["url"], {})
                     if not isinstance(saved, dict):
                         saved = {}
                     description = saved.get("channel_description", "")
                     subscription["channel_description"] = description if isinstance(description, str) else ""
                     subscription["tags"] = normalize_tags(saved.get("tags", []))
-                return self._send_json({"opml": opml_path.name, "exists": exists, "feeds": subscriptions})
+                return self._send_json({"opml": opml_path.name, "exists": exists, "feeds": subscriptions, "added_feeds": added_feed_summaries()})
             except (OSError, ET.ParseError, ValueError, json.JSONDecodeError) as error:
                 return self._send_error_json(error, 500)
         if path == "/api/subscriptions/download":
@@ -1825,6 +2098,21 @@ class LocalHandler(BaseHTTPRequestHandler):
                 return self._send_json({"shortlist": get_shortlist()})
             except (OSError, json.JSONDecodeError, ValueError) as error:
                 return self._send_error_json(error, 500)
+        if path == "/api/added":
+            try:
+                return self._send_json({"items": get_added()})
+            except (OSError, json.JSONDecodeError, ValueError, ET.ParseError) as error:
+                return self._send_error_json(error, 500)
+        if path.startswith("/feeds/"):
+            name = path[len("/feeds/"):]
+            if name not in added_feeds.FEED_FILES.values():
+                return self._send_error_json("Not found.", 404)
+            feed = added_dir() / name
+            if not feed.is_file():
+                with ADDED_LOCK:
+                    media = next(media for media, file in added_feeds.FEED_FILES.items() if file == name)
+                    added_feeds.write_items(added_dir(), media, [])
+            return self._serve_file(feed, "application/rss+xml; charset=utf-8")
         if path == "/api/draft":
             try:
                 return self._send_json(get_draft())
@@ -1892,13 +2180,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                         merged_data, added_count = merge_opml(opml_path.read_bytes(), data)
                     else:
                         merged_data, added_count = data, incoming_count
-                    opml_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = opml_path.with_name(f".{opml_path.name}.{uuid.uuid4().hex}.tmp")
-                    temporary.write_bytes(merged_data)
-                    temporary.replace(opml_path)
-                    if "opml_path" not in config:
-                        config["opml_path"] = str(opml_path.relative_to(BASE_DIR))
-                        atomic_write_json(CONFIG_PATH, config)
+                    write_opml(config, opml_path, merged_data)
                 return self._send_json({
                     "feeds": len(list_opml_subscriptions(merged_data)),
                     "added": added_count if mode == "merge" else incoming_count,
@@ -1906,6 +2188,22 @@ class LocalHandler(BaseHTTPRequestHandler):
                     "mode": mode,
                 })
             except (OSError, ValueError, KeyError, ET.ParseError, json.JSONDecodeError) as error:
+                return self._send_error_json(error)
+        if path == "/api/add/inspect":
+            try:
+                payload = json.loads(self._read_body(64 * 1024))
+                if not isinstance(payload, dict):
+                    raise TypeError("Expected the pasted links.")
+                return self._send_json(inspect_links(payload.get("text")))
+            except (OSError, TypeError, ValueError, ET.ParseError, json.JSONDecodeError) as error:
+                return self._send_error_json(error)
+        if path == "/api/add":
+            try:
+                payload = json.loads(self._read_body(MAX_JSON_BYTES))
+                if not isinstance(payload, dict):
+                    raise TypeError("Expected the links to add.")
+                return self._send_json(add_from_links(payload.get("rows")))
+            except (OSError, TypeError, ValueError, ET.ParseError, json.JSONDecodeError) as error:
                 return self._send_error_json(error)
         if path == "/api/llm/settings":
             try:
@@ -1969,6 +2267,18 @@ class LocalHandler(BaseHTTPRequestHandler):
                 shortlist = add_to_shortlist(payload)
                 return self._send_json({"shortlist": shortlist})
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return self._send_error_json(error, 400)
+        if path in ("/api/added/remove", "/api/added/fetch", "/api/added/move"):
+            try:
+                payload = json.loads(self._read_body(16 * 1024))
+                if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+                    raise TypeError("Expected an added item's URL.")
+                if path == "/api/added/remove":
+                    return self._send_json({"items": remove_added(payload["url"])})
+                if path == "/api/added/move":
+                    return self._send_json(move_added(payload["url"], payload.get("media")))
+                return self._send_json(fetch_added_details(payload["url"]))
+            except (OSError, TypeError, ValueError, ET.ParseError, json.JSONDecodeError) as error:
                 return self._send_error_json(error, 400)
         if path == "/api/shortlist/remove":
             try:
