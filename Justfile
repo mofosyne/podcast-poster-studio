@@ -31,5 +31,5 @@ test:
 
 # Check Python syntax and the local user config JSON.
 check:
-    .venv/bin/python -m py_compile fetch_episodes.py gen.py resolve_feeds.py server.py webapp.py link_preview.py feed_discovery.py added_feeds.py
+    .venv/bin/python -m py_compile fetch_episodes.py gen.py resolve_feeds.py server.py webapp.py link_preview.py feed_discovery.py added_feeds.py user_state.py rss_export.py
     .venv/bin/python -m json.tool user-data/config.json > /dev/null

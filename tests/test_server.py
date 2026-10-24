@@ -8,6 +8,7 @@ from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 import server
+import user_state
 
 
 class LocalWorkflowTests(unittest.TestCase):
@@ -479,7 +480,7 @@ class LocalWorkflowTests(unittest.TestCase):
                 saved = server.save_subscription_metadata(
                     feed_url, "A Greens-affiliated podcast.", ["#Environment", "Environment", "Climate"]
                 )
-                config = json.loads(config_path.read_text(encoding="utf-8"))
+                config = user_state.load(config_path)
 
         self.assertEqual(saved["tags"], ["Environment", "Climate"])
         self.assertEqual(config["subscription_metadata"][feed_url]["channel_description"], "A Greens-affiliated podcast.")
@@ -975,8 +976,12 @@ class LocalWorkflowTests(unittest.TestCase):
             with patch.object(server, "CONFIG_PATH", config_path):
                 server.save_slots([self.make_slot()], "single", "ink-saving")
 
-            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            saved = user_state.load(config_path)
+            settings = json.loads(config_path.read_text(encoding="utf-8"))
+            draft = json.loads((config_path.parent / "draft.json").read_text(encoding="utf-8"))
 
+        self.assertNotIn("slots", settings)
+        self.assertEqual(draft[0]["url"], self.make_slot()["url"])
         self.assertEqual(saved["poster_period"], "month")
         self.assertEqual(saved["poster_layout"], "single")
         self.assertEqual(saved["poster_theme"], "ink-saving")
@@ -1017,7 +1022,7 @@ class LocalWorkflowTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     server.update_draft_slot(second, {"summary": "gone"})
 
-                saved = json.loads(config_path.read_text(encoding="utf-8"))
+                saved = user_state.load(config_path)
                 self.assertEqual(saved["poster_period"], "month")
                 self.assertEqual([slot["url"] for slot in saved["slots"]], [first])
                 self.assertEqual(server.clear_draft(), [])
@@ -1056,7 +1061,7 @@ class LocalWorkflowTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     server.add_to_draft({**self.make_draft_slot(), "type": "latest"})
 
-            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            saved = user_state.load(config_path)
         self.assertEqual(len(saved["slots"]), server.MAX_POSTER_SLOTS)
 
     def test_draft_keeps_hand_configured_latest_slots(self):
@@ -1215,7 +1220,7 @@ class LocalWorkflowTests(unittest.TestCase):
             ):
                 server.generate_poster(None, "list", "dark")
 
-            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            saved = user_state.load(config_path)
 
         self.assertEqual([item["url"] for item in saved["shortlist"]], [kept])
         self.assertEqual(len(saved["slots"]), 1)

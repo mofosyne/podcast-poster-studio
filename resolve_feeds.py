@@ -8,13 +8,14 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import user_state
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "user-data" / "config.json"
 
 if not CONFIG_PATH.is_file():
     raise SystemExit("User config not found; run `just setup` to create user-data/config.json.")
-with CONFIG_PATH.open(encoding="utf-8") as f:
-    config = json.load(f)
+config = user_state.load(CONFIG_PATH)
 
 opml_path = Path(config["opml_path"])
 if not opml_path.is_absolute():

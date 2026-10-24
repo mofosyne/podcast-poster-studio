@@ -31,6 +31,8 @@ FEED_TITLES = {"podcast": "Added episodes", "video": "Added videos", "article": 
 MAX_ITEMS_PER_FEED = 500
 MAX_SUMMARY_CHARS = 400
 STATUSES = ("pending", "ready", "failed")
+# Fields you can write yourself when adding an item. A fetch never replaces them.
+CUSTOM_FIELDS = ("episode", "summary", "tags")
 
 
 def feed_path(directory, media):
@@ -55,7 +57,8 @@ def complete(entry):
     published = parse_time(entry.get("published_at"))
     added = parse_time(entry.get("added_at")) or datetime.now(timezone.utc)
     entry["date"] = display_date(published) if published else f"Added {display_date(added)}"
-    if entry.get("description"):
+    entry["custom"] = [field for field in CUSTOM_FIELDS if field in (entry.get("custom") or [])]
+    if entry.get("description") and "summary" not in entry["custom"]:
         entry["summary"] = clean_text(entry["description"], MAX_SUMMARY_CHARS)
     if entry.get("duration_seconds"):
         entry["duration"] = format_duration(str(entry["duration_seconds"]))
@@ -91,6 +94,7 @@ def read_items(directory, media):
             ("status", f"{{{PPS}}}status"),
             ("error", f"{{{PPS}}}error"),
             ("artwork_path", f"{{{PPS}}}artwork"),
+            ("summary", f"{{{PPS}}}summary"),
         ):
             if text(tag):
                 entry[key] = text(tag)
@@ -105,6 +109,7 @@ def read_items(directory, media):
         if thumbnail is not None and thumbnail.get("url"):
             entry["image_url"] = thumbnail.get("url")
         entry["tags"] = [category.text.strip() for category in node.findall("category") if category.text and category.text.strip()]
+        entry["custom"] = text(f"{{{PPS}}}custom").split()
         if entry.get("status") not in STATUSES:
             entry["status"] = "pending"
         items.append(complete(entry))
@@ -152,6 +157,11 @@ def write_items(directory, media, items):
             ET.SubElement(item, f"{{{PPS}}}error").text = entry["error"][:300]
         if entry.get("artwork_path"):
             ET.SubElement(item, f"{{{PPS}}}artwork").text = str(entry["artwork_path"])
+        custom = [field for field in CUSTOM_FIELDS if field in (entry.get("custom") or [])]
+        if custom:
+            ET.SubElement(item, f"{{{PPS}}}custom").text = " ".join(custom)
+        if "summary" in custom and entry.get("summary"):
+            ET.SubElement(item, f"{{{PPS}}}summary").text = entry["summary"]
     ET.indent(rss)
     path = feed_path(directory, media)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,8 +174,12 @@ def find(directory, url):
     return next((item for item in read_all(directory) if item["url"] == url), None)
 
 
-def add(directory, urls, media, now=None):
-    """Save bare items for new URLs; returns the URLs actually added (known ones are skipped)."""
+def add(directory, urls, media, now=None, details=None):
+    """Save bare items for new URLs; returns the URLs actually added (known ones are skipped).
+
+    details maps a URL to fields you wrote yourself (title as "episode", summary,
+    tags); they are kept when the item's details are fetched later.
+    """
     if media not in MEDIA_TYPES:
         raise ValueError('Media type must be "podcast", "video", or "article".')
     known = {item["url"] for item in read_all(directory)}
@@ -175,7 +189,14 @@ def add(directory, urls, media, now=None):
     items = read_items(directory, media)
     if len(items) + len(new) > MAX_ITEMS_PER_FEED:
         raise ValueError(f"{FEED_TITLES[media]} holds at most {MAX_ITEMS_PER_FEED} items. Remove some before adding more.")
-    write_items(directory, media, items + [bare_link(url, now) for url in new])
+    entries = []
+    for url in new:
+        entry = bare_link(url, now)
+        custom = {key: value for key, value in ((details or {}).get(url) or {}).items() if key in CUSTOM_FIELDS and value}
+        entry.update(custom)
+        entry["custom"] = list(custom)
+        entries.append(entry)
+    write_items(directory, media, items + entries)
     return new
 
 
@@ -212,6 +233,11 @@ def update(directory, url, details):
             if item["url"] != url:
                 continue
             updated = {**details, "url": url, "media": media, "added_at": item.get("added_at")}
+            # What you wrote yourself wins over fetched details.
+            for field in item.get("custom") or []:
+                if field in item:
+                    updated[field] = item[field]
+            updated["custom"] = item.get("custom") or []
             items[index] = complete(updated)
             write_items(directory, media, items)
             return items[index]

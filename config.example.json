@@ -12,8 +12,7 @@
   "video_poster_title": "VIDEOS WORTH WATCHING THIS {period}",
   "article_poster_title": "READS WORTH YOUR TIME THIS {period}",
   "mixed_poster_title": "WORTH YOUR TIME THIS {period}",
-  "subscription_metadata": {},
-  "llm": {"enabled": false},
-  "slots": [],
-  "shortlist": []
+  "llm": {
+    "enabled": false
+  }
 }

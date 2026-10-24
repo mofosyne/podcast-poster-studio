@@ -226,6 +226,37 @@ class AddFlowTests(unittest.TestCase):
         self.assertEqual(items[ARTICLE]["media"], "article")
         self.assertNotIn("links", json.loads(self.config_path.read_text()))
 
+    def test_details_typed_when_adding_are_kept_over_fetched_ones(self):
+        server.add_from_links([{"url": VIDEO, "item": True, "media": "video", "details": {
+            "title": "My title", "summary": "Why it matters.", "tags": ["#Transit", "transit", "Cities"],
+        }}])
+        item = server.get_added()[0]
+        self.assertEqual((item["episode"], item["summary"], item["tags"]), ("My title", "Why it matters.", ["Transit", "Cities"]))
+        resolved = {**link_preview.bare_link(VIDEO, NOW), "status": "ready", "episode": "Page title",
+                    "description": "Page description.", "tags": ["Page"], "show": "Channel"}
+
+        with patch.object(link_preview, "resolve_link", return_value=(resolved, [])):
+            fetched = server.fetch_added_details(VIDEO)["item"]
+
+        self.assertEqual((fetched["episode"], fetched["summary"], fetched["tags"]), ("My title", "Why it matters.", ["Transit", "Cities"]))
+        self.assertEqual((fetched["show"], fetched["description"]), ("Channel", "Page description."))
+
+    def test_a_note_and_tags_typed_for_a_followed_feed_become_its_channel_notes(self):
+        feed = "https://www.youtube.com/feeds/videos.xml?channel_id=UC1"
+        server.add_from_links([{"url": VIDEO, "item": False, "follow": {
+            "url": feed, "title": "Not Just Bikes", "note": "Urbanism explainers.", "tags": ["Cities"],
+        }}])
+        notes = server.load_config()["subscription_metadata"][feed]
+        self.assertEqual(notes, {"channel_description": "Urbanism explainers.", "tags": ["Cities"]})
+
+    def test_an_invalid_detail_adds_nothing(self):
+        with self.assertRaises(ValueError):
+            server.add_from_links([
+                {"url": ARTICLE, "item": True, "media": "article"},
+                {"url": VIDEO, "item": True, "media": "video", "details": {"summary": "x" * 401}},
+            ])
+        self.assertEqual(server.get_added(), [])
+
     def test_a_poster_may_mix_media_types(self):
         slots = [
             {"type": "fixed", "show": "Show", "episode": "One", "date": "October 1, 2026", "url": "https://example.test/one", "feed_url": "https://example.test/feed.xml"},

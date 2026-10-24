@@ -55,6 +55,11 @@ dialog.add-dialog::backdrop{background:#0009}
 .add-result select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 6px;font:inherit;font-size:13px}
 .add-result .add-error{color:var(--danger);font-size:13px}
 .add-result .add-already{color:var(--muted);font-size:13px}
+.add-extra summary{cursor:pointer;color:var(--accent);font-size:13px}
+.add-extra .add-fields{display:grid;gap:8px;margin-top:8px}
+.add-extra label{display:grid;gap:4px;color:var(--muted);font-size:13px}
+.add-extra input,.add-extra textarea{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font:inherit;font-size:14px}
+.add-extra textarea{min-height:60px;resize:vertical}
 .dialog-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:6px}
 a{color:var(--accent)}
 .notice{color:var(--muted);font-size:13px}
@@ -255,6 +260,7 @@ a{color:var(--accent)}
     <h3 class="subscription-section">Added by hand</h3>
     <p class="notice">Single videos, episodes, and articles you add live in one feed per type, not in your OPML. Each is a standard RSS file any feed reader can follow.</p>
     <div id="addedFeedList" class="added-feeds"></div>
+    <p class="notice">Also as RSS: <a href="/feeds/shortlist.xml" target="_blank" rel="noopener">★ your shortlist</a> · <a href="/feeds/posters.xml" target="_blank" rel="noopener">your posters</a> (each with its PDF).</p>
     <h3 class="subscription-section">Following</h3>
     <div id="subscriptionAiTools" class="controls subscription-batch" hidden>
       <label for="subscriptionBatchSize">Batch size</label>
@@ -271,7 +277,7 @@ a{color:var(--accent)}
   <section id="historyPanel" class="panel tab-panel" role="tabpanel" aria-labelledby="historyTab" hidden>
     <div class="panel-head">
       <div><h2>Poster history</h2><p class="notice">Every generated poster is archived here. Mark each one printed once it is up; episodes on earlier posters are flagged when picking.</p></div>
-      <div class="controls"><button class="danger" id="clearHistory" type="button" disabled>Clear poster archive</button></div>
+      <div class="controls"><a class="download-link" href="/feeds/posters.xml" target="_blank" rel="noopener" title="Follow your posters in a feed reader; each item links its PDF">RSS feed</a><button class="danger" id="clearHistory" type="button" disabled>Clear poster archive</button></div>
     </div>
     <div id="historyList" class="history-list"></div>
   </section>
@@ -1738,6 +1744,42 @@ function addCheckbox(checked, onChange){
   return box;
 }
 
+function parseTagText(text){
+  return [...new Set(text.split(",").map(tag => tag.trim().replace(/^#+/, "").trim()).filter(Boolean))];
+}
+
+// Optional fields under a row. Typing in them ticks the row's checkbox, since
+// details only make sense for something being added.
+function addDetailsEditor(heading, fields, values, checkbox, onTick){
+  const details = document.createElement("details");
+  details.className = "add-extra";
+  const summary = document.createElement("summary");
+  summary.textContent = heading;
+  const list = document.createElement("div");
+  list.className = "add-fields";
+  for(const field of fields){
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    const input = document.createElement(field.multiline ? "textarea" : "input");
+    if(!field.multiline) input.type = "text";
+    input.maxLength = field.max;
+    input.placeholder = field.placeholder || "";
+    input.value = values[field.key] || "";
+    input.addEventListener("input", () => {
+      values[field.key] = input.value;
+      if(!checkbox.checked && input.value.trim()){
+        checkbox.checked = true;
+        onTick();
+        updateAddConfirm();
+      }
+    });
+    label.append(input);
+    list.append(label);
+  }
+  details.append(summary, list);
+  return details;
+}
+
 function renderAddRows(){
   addResults.replaceChildren();
   for(const row of addRows){
@@ -1762,13 +1804,18 @@ function renderAddRows(){
           type.append(new Option(`${info.icon} ${info.label.toLowerCase()}`, value, false, value === row.media));
         }
         type.addEventListener("change", () => { row.media = type.value; });
-        label.append(addCheckbox(row.addItem, checked => { row.addItem = checked; }), "Add this", type);
+        const checkbox = addCheckbox(row.addItem, checked => { row.addItem = checked; });
+        label.append(checkbox, "Add this", type);
         if(result.item.title){
           const title = document.createElement("strong");
           title.textContent = result.item.title;
           label.append(title);
         }
-        card.append(label);
+        card.append(label, addDetailsEditor("Add your own title, summary, or tags (optional)", [
+          {key:"title", label:"Title", max:300, placeholder:"Leave blank to use the page's title"},
+          {key:"summary", label:"Poster summary", max:400, multiline:true, placeholder:"Leave blank to use the page's description"},
+          {key:"tags", label:"Tags (comma-separated)", max:500, placeholder:"e.g. Transit, Cities"},
+        ], row.itemDetails, checkbox, () => { row.addItem = true; }));
       }
     }
     if(result.follow){
@@ -1783,9 +1830,13 @@ function renderAddRows(){
         const label = document.createElement("label");
         const title = document.createElement("strong");
         title.textContent = follow.title;
-        label.append(addCheckbox(row.follow, checked => { row.follow = checked; }), "Follow", title);
+        const checkbox = addCheckbox(row.follow, checked => { row.follow = checked; });
+        label.append(checkbox, "Follow", title);
         if(info) label.append(mediaBadge(follow.media));
-        card.append(label);
+        card.append(label, addDetailsEditor("Add a channel note or default tags (optional)", [
+          {key:"note", label:"Channel note (not printed; helps summaries)", max:400, multiline:true},
+          {key:"tags", label:"Default tags for its items (comma-separated)", max:500, placeholder:"e.g. Climate, Local news"},
+        ], row.followDetails, checkbox, () => { row.follow = true; }));
       }
     }
     if(result.error){
@@ -1811,6 +1862,8 @@ async function checkAddLinks(){
       media:result.item?.media || "article",
       addItem:Boolean(result.item && !result.item.already && result.default === "item"),
       follow:Boolean(result.follow && !result.follow.already && result.default === "follow"),
+      itemDetails:{},
+      followDetails:{},
     }));
     renderAddRows();
     addStatus.textContent = addRows.some(row => row.addItem || row.follow)
@@ -1828,8 +1881,18 @@ async function confirmAdd(){
     url:row.result.url,
     item:row.addItem,
     media:row.media,
+    details:row.addItem ? {
+      title:row.itemDetails.title || "",
+      summary:row.itemDetails.summary || "",
+      tags:parseTagText(row.itemDetails.tags || ""),
+    } : null,
     // A feed the preview already found is used as is; a channel page is looked up again.
-    follow:row.follow ? {url:row.result.follow.feed_url || row.result.follow.url, title:row.result.follow.feed_url ? row.result.follow.title : null} : null,
+    follow:row.follow ? {
+      url:row.result.follow.feed_url || row.result.follow.url,
+      title:row.result.follow.feed_url ? row.result.follow.title : null,
+      note:row.followDetails.note || "",
+      tags:parseTagText(row.followDetails.tags || ""),
+    } : null,
   }));
   if(!rows.length) return;
   addConfirm.disabled = true;

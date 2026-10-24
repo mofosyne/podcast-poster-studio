@@ -21,6 +21,8 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+import user_state
+
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "user-data" / "config.json"
@@ -1688,8 +1690,7 @@ def render_page(episodes, feed_count, cached_count, failed_count, generated_at):
 def main():
     if not CONFIG_PATH.is_file():
         raise SystemExit("User config not found; run `just setup` to create user-data/config.json.")
-    with CONFIG_PATH.open(encoding="utf-8") as config_file:
-        config = json.load(config_file)
+    config = user_state.load(CONFIG_PATH)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opml", type=Path, help="OPML path (defaults to user-data/config.json opml_path)")

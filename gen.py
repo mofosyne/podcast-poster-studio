@@ -22,6 +22,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+import user_state
 from fetch_episodes import MEDIA_TYPES, media_type_for, scan_feed
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -44,8 +45,7 @@ preview_only = arguments.preview
 
 if not CONFIG_PATH.is_file():
     raise SystemExit("User config not found; run `just setup` to create user-data/config.json.")
-with CONFIG_PATH.open(encoding="utf-8") as f:
-    config = json.load(f)
+config = user_state.load(CONFIG_PATH)
 
 regenerate_manifest_path = Path(arguments.regenerate_from).resolve() if arguments.regenerate_from else None
 

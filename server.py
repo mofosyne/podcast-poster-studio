@@ -20,6 +20,8 @@ from urllib.request import Request, urlopen
 import added_feeds
 import feed_discovery
 import link_preview
+import rss_export
+import user_state
 from fetch_episodes import MEDIA_TYPES, is_video_url, media_type_for, render_page
 from webapp import APP_HTML
 
@@ -55,10 +57,14 @@ MAX_LLM_DIAGNOSTICS = 50
 
 
 def load_config():
+    """Settings plus the draft, shortlist, and channel notes kept beside them (see user_state.py)."""
     if not CONFIG_PATH.is_file():
         raise FileNotFoundError("User config not found; run `just setup` first.")
-    with CONFIG_PATH.open(encoding="utf-8") as config_file:
-        return json.load(config_file)
+    return user_state.load(CONFIG_PATH)
+
+
+def save_config(config):
+    user_state.save(CONFIG_PATH, config)
 
 
 def project_path(value):
@@ -247,7 +253,7 @@ def save_llm_settings(payload):
     with CONFIG_LOCK:
         config = load_config()
         config["llm"] = settings
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
     return effective_llm_settings({**config, "llm": settings})
 
 
@@ -783,7 +789,7 @@ def save_slots(slots, layout=None, theme=None):
         config["slots"] = cleaned
         config["poster_layout"] = selected_layout
         config["poster_theme"] = selected_theme
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
     return cleaned
 
 
@@ -844,7 +850,7 @@ def add_to_shortlist(entry):
         shortlist = [item for item in get_shortlist(config) if item.get("url") != cleaned["url"]]
         shortlist.append(cleaned)
         config["shortlist"] = shortlist
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
     return shortlist
 
 
@@ -858,7 +864,7 @@ def remove_from_shortlist(url):
         if len(remaining) == len(shortlist):
             raise ValueError("That episode is not on the shortlist.")
         config["shortlist"] = remaining
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
     return remaining
 
 
@@ -880,7 +886,7 @@ def promote_shortlist_entry(url):
         cleaned_slots = validate_slots(candidate_slots, config.get("poster_layout", "list"))
         config["slots"] = cleaned_slots
         config["shortlist"] = [item for item in shortlist if item.get("url") != url]
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
         result_shortlist = config["shortlist"]
     return {"slots": cleaned_slots, "shortlist": result_shortlist}
 
@@ -895,7 +901,7 @@ def drop_archived_from_shortlist(slots):
         remaining = [item for item in shortlist if not isinstance(item, dict) or item.get("url") not in archived_urls]
         if len(remaining) != len(shortlist):
             config["shortlist"] = remaining
-            atomic_write_json(CONFIG_PATH, config)
+            save_config(config)
 
 
 # Hand-added items: single videos, episodes, and articles you paste in. They are
@@ -928,7 +934,7 @@ def migrate_config_links():
                 media = link.get("media") if link.get("media") in MEDIA_TYPES else "video" if is_video_url(url) else "article"
                 if added_feeds.add(added_dir(), [url], media):
                     added_feeds.update(added_dir(), url, {key: value for key, value in link.items() if key not in {"url", "media"}})
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
 
 
 def get_added():
@@ -995,7 +1001,7 @@ def refresh_saved_copies(item, previous):
         if draft_changed:
             config["slots"] = slots
         if shortlist_changed or draft_changed:
-            atomic_write_json(CONFIG_PATH, config)
+            save_config(config)
     return shortlist_changed, draft_changed
 
 
@@ -1067,34 +1073,76 @@ def inspect_links(text):
     return {"results": results}
 
 
+def optional_text(value, label, limit):
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError(f"{label} must be text of at most {limit} characters.")
+    return value.strip()
+
+
+def clean_item_details(details):
+    """The optional title, poster summary, and tags typed for an item in the + Add preview."""
+    if details is None:
+        return {}
+    if not isinstance(details, dict):
+        raise TypeError("Item details must be an object.")
+    cleaned = {
+        "episode": optional_text(details.get("title"), "A title", 300),
+        "summary": optional_text(details.get("summary"), "A poster summary", 400),
+        "tags": normalize_tags(details.get("tags") or []),
+    }
+    return {key: value for key, value in cleaned.items() if value}
+
+
+def clean_follow_details(follow):
+    """The optional channel note and default tags typed for a feed in the + Add preview."""
+    return (
+        optional_text(follow.get("note"), "A channel note", MAX_CHANNEL_DESCRIPTION_LENGTH),
+        normalize_tags(follow.get("tags") or []),
+    )
+
+
 def add_from_links(rows):
     """Add the items and follow the feeds chosen in the + Add preview."""
     if not isinstance(rows, list) or not rows or len(rows) > MAX_ADD_LINKS:
         raise ValueError(f"Choose between 1 and {MAX_ADD_LINKS} links to add.")
-    results = []
-    new_items = {media: [] for media in MEDIA_TYPES}
+    # Check everything typed before changing anything, so a bad field adds nothing.
     for row in rows:
         if not isinstance(row, dict):
             raise TypeError("Each link to add must be an object.")
+        if row.get("item"):
+            validate_media_type(row.get("media"))
+            clean_item_details(row.get("details"))
+        if isinstance(row.get("follow"), dict):
+            clean_follow_details(row["follow"])
+    results = []
+    new_items = {media: [] for media in MEDIA_TYPES}
+    item_details = {}
+    for row in rows:
         result = {"url": row.get("url"), "item": None, "follow": None, "error": ""}
         url = link_preview.http_url(row.get("url"))
         if row.get("item"):
             if not url:
                 result["error"] = "Not a web link."
             else:
-                new_items[validate_media_type(row.get("media"))].append(url)
+                new_items[row["media"]].append(url)
+                item_details[url] = clean_item_details(row.get("details"))
                 result["item"] = {"media": row["media"]}
         follow = row.get("follow")
         if isinstance(follow, dict) and not result["error"]:
             try:
                 result["follow"] = add_subscription(follow.get("url"), follow.get("title"))
+                note, tags = clean_follow_details(follow)
+                if result["follow"]["added"] and (note or tags):
+                    save_subscription_metadata(result["follow"]["feed_url"], note, tags)
             except ValueError as error:
                 result["error"] = str(error)
         results.append(result)
     added = []
     with ADDED_LOCK:
         for media, urls in new_items.items():
-            added += added_feeds.add(added_dir(), urls, media)
+            added += added_feeds.add(added_dir(), urls, media, details=item_details)
         items = added_feeds.read_all(added_dir())
     for result in results:
         if result["item"]:
@@ -1107,7 +1155,7 @@ def add_from_links(rows):
     }
 
 
-# The poster draft is the working selection: config["slots"], edited in place by
+# The poster draft is the working selection: config["slots"] (saved to draft.json), edited in place by
 # the browser workflow and read by gen.py. Fixed slots are keyed by episode URL;
 # hand-configured "latest" slots by their feed.
 def slot_key(slot):
@@ -1138,7 +1186,7 @@ def _draft_position(slots, key):
 
 def _save_draft(config, slots):
     config["slots"] = slots
-    atomic_write_json(CONFIG_PATH, config)
+    save_config(config)
     return slots
 
 
@@ -1225,7 +1273,7 @@ def save_poster_settings(layout=None, theme=None):
             config["poster_layout"] = layout
         if theme is not None:
             config["poster_theme"] = validate_poster_theme(theme)
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
     return {"layout": config.get("poster_layout", "list"), "theme": config.get("poster_theme", "dark")}
 
 
@@ -1482,7 +1530,7 @@ def generate_poster(slots=None, layout=None, theme=None):
                 validate_layout(selected_layout, config.get("slots", []))
                 config["poster_layout"] = selected_layout
                 config["poster_theme"] = selected_theme
-                atomic_write_json(CONFIG_PATH, config)
+                save_config(config)
         else:
             config = load_config()
             validate_layout(config.get("poster_layout", "list"), config.get("slots", []))
@@ -1854,7 +1902,7 @@ def write_opml(config, opml_path, data):
     temporary.replace(opml_path)
     if "opml_path" not in config:
         config["opml_path"] = str(opml_path.relative_to(BASE_DIR))
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
 
 
 def add_subscription(url, title=None):
@@ -1909,7 +1957,7 @@ def save_subscription_metadata(feed_url, channel_description, tags):
         else:
             metadata.pop(feed_url, None)
         config["subscription_metadata"] = metadata
-        atomic_write_json(CONFIG_PATH, config)
+        save_config(config)
     return {"feed_url": feed_url, "channel_description": channel_description.strip(), "tags": cleaned_tags}
 
 
@@ -1975,6 +2023,13 @@ class LocalHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
+
+    def _base_url(self):
+        """This server's address as the browser reached it, for links inside feeds."""
+        host = self.headers.get("Host", "")
+        if not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?|\[[0-9A-Fa-f:]+\](:\d{1,5})?", host):
+            host = f"{HOST}:{PORT}"
+        return f"http://{host}"
 
     def _send_json(self, data, status=200):
         encoded = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -2102,6 +2157,22 @@ class LocalHandler(BaseHTTPRequestHandler):
             try:
                 return self._send_json({"items": get_added()})
             except (OSError, json.JSONDecodeError, ValueError, ET.ParseError) as error:
+                return self._send_error_json(error, 500)
+        if path in ("/feeds/shortlist.xml", "/feeds/posters.xml"):
+            try:
+                base_url = self._base_url()
+                if path == "/feeds/shortlist.xml":
+                    feed = rss_export.shortlist_rss(get_shortlist(), base_url)
+                else:
+                    directory = history_directory()
+
+                    def pdf_size(record):
+                        pdf = directory / str(record.get("pdf") or "")
+                        return pdf.stat().st_size if record.get("pdf") and pdf.is_file() else None
+
+                    feed = rss_export.posters_rss(get_history(), base_url, pdf_size)
+                return self._send_bytes(feed, "application/rss+xml; charset=utf-8")
+            except (OSError, json.JSONDecodeError, ValueError) as error:
                 return self._send_error_json(error, 500)
         if path.startswith("/feeds/"):
             name = path[len("/feeds/"):]
@@ -2436,9 +2507,11 @@ class LocalHandler(BaseHTTPRequestHandler):
 def main():
     if not CONFIG_PATH.is_file():
         raise SystemExit("User config not found; run `just setup` first.")
+    if user_state.migrate(CONFIG_PATH):
+        print("Moved the poster draft, shortlist, and channel notes out of config.json into their own files.")
     server = ThreadingHTTPServer((HOST, PORT), LocalHandler)
     server.daemon_threads = True
-    print(f"Podcast poster is ready at http://{HOST}:{PORT}/")
+    print(f"Poster Studio is ready at http://{HOST}:{PORT}/")
     print("Only this computer can connect; press Ctrl-C to stop.")
     try:
         server.serve_forever()
