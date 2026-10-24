@@ -672,7 +672,7 @@ class LocalWorkflowTests(unittest.TestCase):
 
             saved_page = candidate_path.read_text(encoding="utf-8")
 
-        self.assertIn('data-page-version="21"', page)
+        self.assertIn('data-page-version="22"', page)
         self.assertIn("choose up to six for the poster", page)
         self.assertIn('type:"draft-add"', page)
         self.assertIn('id="bulkSuggestionBatchSize"', page)
@@ -711,9 +711,9 @@ class LocalWorkflowTests(unittest.TestCase):
                     httpd.server_close()
                     thread.join(timeout=2)
 
-        self.assertIn("Podcast Poster Studio", page)
+        self.assertIn("<title>Poster Studio</title>", page)
         # Three numbered steps, with library and settings pages beside them.
-        self.assertIn('data-tab="pick"><span class="step-number">1</span>Pick episodes', page)
+        self.assertIn('data-tab="pick"><span class="step-number">1</span>Pick <span class="tab-count"', page)
         self.assertIn('data-tab="edit"><span class="step-number">2</span>Edit text', page)
         self.assertIn('data-tab="poster"><span class="step-number">3</span>Poster', page)
         for secondary in ("subscriptions", "history", "settings"):

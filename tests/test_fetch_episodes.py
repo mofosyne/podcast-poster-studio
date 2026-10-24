@@ -32,6 +32,24 @@ FEED_URL = "https://example.test/podcast.xml"
 
 
 class EpisodeParsingTests(unittest.TestCase):
+    def test_feed_media_type_comes_from_audio_files_or_a_video_host(self):
+        podcast = b"""<rss><channel><title>Show</title><item><title>One</title><link>https://example.test/one</link>
+            <enclosure url="https://example.test/one.mp3" type="audio/mpeg"/>
+            <pubDate>Mon, 12 Oct 2026 10:00:00 GMT</pubDate></item></channel></rss>"""
+        blog = b"""<rss><channel><title>Blog</title><item><title>Post</title><link>https://example.test/post</link>
+            <pubDate>Mon, 12 Oct 2026 10:00:00 GMT</pubDate></item></channel></rss>"""
+        youtube = b"""<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+            <title>Channel</title><entry><title>Video</title><link rel="alternate" href="https://www.youtube.com/watch?v=abc"/>
+            <published>2026-10-12T10:00:00+00:00</published>
+            <media:group><media:description>About the video.</media:description></media:group></entry></feed>"""
+
+        self.assertEqual(parse_feed(podcast, "Show", FEED_URL, NOW)[0]["media"], "podcast")
+        self.assertEqual(parse_feed(blog, "Blog", FEED_URL, NOW)[0]["media"], "article")
+        video = parse_feed(youtube, "Channel", "https://www.youtube.com/feeds/videos.xml?channel_id=UC1", NOW)[0]
+        self.assertEqual(video["media"], "video")
+        # YouTube keeps each video's description inside <media:group>.
+        self.assertEqual(video["description"], "About the video.")
+
     def test_rss_entries_are_parsed_without_a_recency_cutoff(self):
         feed = b"""<?xml version='1.0'?>
         <rss version='2.0'><channel>
@@ -200,7 +218,7 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertIn("\\u003c/script>", page)
         self.assertIn("Earlier poster", page)
         self.assertIn("1 previously posted", page)
-        self.assertIn('data-page-version="21"', page)
+        self.assertIn('data-page-version="22"', page)
         self.assertIn("up to 400 characters", page)
         # Standalone (file) mode keeps its own review step and fixed-slot export.
         self.assertIn("Episode tags (edit these suggestions for this episode only)", page)

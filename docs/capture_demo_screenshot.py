@@ -14,11 +14,13 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import added_feeds
 import server
 from fetch_episodes import render_page
 
 OUTPUT = ROOT / "docs" / "interface.png"
 FEEDS = [
+    ("Example: Street Level", "street", "A video channel riding transit and walking streets around the world.", ["Transit", "Cities"], ("#2f3f5c", "#e07a5f")),
     ("Example: Climate Briefing", "climate", "Clear reporting on climate policy, clean energy, and local action.", ["Climate", "Environment"], ("#244f46", "#83c56a")),
     ("Example: Field Notes", "field", "Ecologists explore biodiversity and the changing world around us.", ["Ecology", "Biodiversity"], ("#795834", "#e4bd72")),
     ("Example: Civic Signals", "civic", "Conversations about Australian politics, public policy, and democracy.", ["Australian Politics", "Democracy"], ("#3a496e", "#91b7e2")),
@@ -57,7 +59,8 @@ def main():
             outlines.append(f'<outline text="{escape(title)}" xmlUrl="{url}"/>')
             episodes.append({
                 "show": title,
-                "episode": f"A recent conversation from {slug}",
+                "media": "video" if slug == "street" else "podcast",
+                "episode": "Riding a driverless metro across the whole city" if slug == "street" else f"A recent conversation from {slug}",
                 "date": "October 18, 2026",
                 "published_at": f"2026-10-{18-index:02d}T10:00:00+00:00",
                 "url": f"https://example.test/episode-{index}",
@@ -71,6 +74,20 @@ def main():
             })
             if index <= 2:
                 saved_metadata[url] = {"channel_description": description, "tags": tags}
+
+        # One hand-added article, so the list shows an added item next to feed episodes.
+        draw_cover(artwork_dir / "demo-article.png", "journal", ("#5b4a6b", "#c7b8e0"))
+        added_feeds.write_items(user_data / "feeds", "article", [{
+            "url": "https://example.test/journal/ten-small-streets",
+            "show": "Example: Field Notes Journal",
+            "episode": "Ten small streets that show how a town can change",
+            "feed_url": "https://example.test/journal/",
+            "description": "A walk through ten ordinary streets that were quietly redesigned, and what neighbours say now.",
+            "published_at": "2026-10-17T08:00:00+00:00",
+            "added_at": "2026-10-20T08:00:00+00:00",
+            "artwork_path": "user-data/cache/artwork/demo-article.png",
+            "status": "ready",
+        }])
 
         opml_path = user_data / "subscriptions.opml"
         opml_path.write_text(
@@ -92,7 +109,7 @@ def main():
             "subscription_metadata": saved_metadata,
             # Two picks in the poster draft, so the screenshot shows the selection tray.
             "slots": [
-                {key: episode[key] for key in ("show", "episode", "date", "url", "feed_url", "description", "artwork_path", "tags")}
+                {key: episode[key] for key in ("show", "episode", "date", "url", "feed_url", "media", "description", "artwork_path", "tags")}
                 | {"type": "fixed", "summary": episode["description"]}
                 for episode in episodes[:2]
             ],

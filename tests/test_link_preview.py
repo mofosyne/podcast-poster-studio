@@ -1,5 +1,4 @@
 import json
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +6,6 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 import link_preview
-import server
 
 NOW = datetime(2026, 10, 22, 9, 30, tzinfo=timezone.utc)
 
@@ -150,124 +148,6 @@ class LinkPreviewTests(unittest.TestCase):
         for url in ("ftp://example.com/file", "example.com", "javascript:alert(1)", ""):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 link_preview.resolve_link(url, Path("/tmp"), NOW)
-
-
-class LinkStoreTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        root = Path(self.directory.name)
-        self.config_path = root / "user-data" / "config.json"
-        self.config_path.parent.mkdir()
-        self.config_path.write_text(json.dumps({"poster_layout": "list", "slots": []}), encoding="utf-8")
-        self.artwork = root / "user-data" / "cache" / "artwork" / "link-abc-v2.png"
-        self.artwork.parent.mkdir(parents=True)
-        self.artwork.write_bytes(b"png")
-        self.patches = [
-            patch.object(server, "CONFIG_PATH", self.config_path),
-            patch.object(server, "USER_DATA_DIR", root / "user-data"),
-            patch.object(server, "BASE_DIR", root),
-        ]
-        for active in self.patches:
-            active.start()
-
-    def tearDown(self):
-        for active in reversed(self.patches):
-            active.stop()
-        self.directory.cleanup()
-
-    def resolved(self, url, **changes):
-        entry = {
-            **link_preview.bare_link(url, NOW),
-            "status": "ready",
-            "show": "Not Just Bikes",
-            "episode": "A video about trains",
-            "date": "January 2, 2026",
-            "published_at": "2026-01-02T11:04:05+00:00",
-            "feed_url": "https://www.youtube.com/@NotJustBikes",
-            "summary": "Why trains are great.",
-            "artwork_path": self.artwork,
-        }
-        entry.update(changes)
-        return entry, []
-
-    def test_bare_links_are_saved_immediately_and_deduplicated(self):
-        result = server.add_links({"text": "https://a.example/one\nhttps://b.example/two  https://a.example/one"})
-        again = server.add_links({"urls": ["https://a.example/one"]})
-
-        self.assertEqual(result["added"], ["https://a.example/one", "https://b.example/two"])
-        self.assertEqual(again["added"], [])
-        links = server.get_links()
-        self.assertEqual([link["status"] for link in links], ["pending", "pending"])
-        self.assertEqual(links[0]["show"], "a.example")
-        self.assertEqual(links[0]["episode"], "https://a.example/one")
-        with self.assertRaises(ValueError):
-            server.add_links({"text": "https://ok.example not-a-link"})
-
-    def test_a_bare_link_can_be_shortlisted_and_picked_before_details_arrive(self):
-        url = "https://www.youtube.com/watch?v=abc123"
-        server.add_links({"urls": [url]})
-        bare = server.get_links()[0]
-        copy = {key: bare[key] for key in ("show", "episode", "date", "url", "feed_url")}
-        server.add_to_shortlist(copy)
-        server.add_to_draft({**copy, "type": "fixed"})
-        server.update_draft_slot(url, {"summary": "My own words."})
-
-        with patch.object(link_preview, "resolve_link", return_value=self.resolved(url)):
-            result = server.fetch_link_details(url)
-
-        self.assertTrue(result["shortlist_changed"])
-        self.assertTrue(result["draft_changed"])
-        link = server.get_links()[0]
-        self.assertEqual(link["status"], "ready")
-        self.assertEqual(link["artwork_path"], "user-data/cache/artwork/link-abc-v2.png")
-        self.assertEqual(link["added_at"], bare["added_at"])
-        shortlisted = server.get_shortlist()[0]
-        self.assertEqual(shortlisted["episode"], "A video about trains")
-        self.assertEqual(shortlisted["summary"], "Why trains are great.")
-        slot = server.get_draft_slots(server.load_config())[0]
-        self.assertEqual(slot["show"], "Not Just Bikes")
-        self.assertEqual(slot["date"], "January 2, 2026")
-        self.assertEqual(slot["artwork_path"], "user-data/cache/artwork/link-abc-v2.png")
-        # The summary typed before the fetch finished is kept.
-        self.assertEqual(slot["summary"], "My own words.")
-        server.validate_slots([slot])
-
-    def test_failed_fetch_keeps_the_link_and_records_the_error(self):
-        url = "https://offline.example/page"
-        server.add_links({"urls": [url]})
-        failed = {**link_preview.bare_link(url, NOW), "status": "failed", "error": "page: offline"}
-
-        with patch.object(link_preview, "resolve_link", return_value=(failed, ["page: offline"])):
-            result = server.fetch_link_details(url)
-
-        self.assertEqual(result["link"]["status"], "failed")
-        self.assertEqual(result["link"]["error"], "page: offline")
-        self.assertEqual(server.get_links()[0]["episode"], url)
-
-    def test_undated_link_keeps_its_added_date(self):
-        url = "https://blog.example/post"
-        server.add_links({"urls": [url]})
-        added_date = server.get_links()[0]["date"]
-        entry, _ = self.resolved(url, date="Added January 1, 2030")
-        entry.pop("published_at")
-
-        with patch.object(link_preview, "resolve_link", return_value=(entry, [])):
-            server.fetch_link_details(url)
-
-        self.assertEqual(server.get_links()[0]["date"], added_date)
-
-    def test_remove_link_leaves_shortlist_copy(self):
-        url = "https://a.example/one"
-        server.add_links({"urls": [url]})
-        bare = server.get_links()[0]
-        server.add_to_shortlist({key: bare[key] for key in ("show", "episode", "date", "url", "feed_url")})
-
-        self.assertEqual(server.remove_link(url), [])
-        self.assertEqual(len(server.get_shortlist()), 1)
-        with self.assertRaises(ValueError):
-            server.remove_link(url)
-        with self.assertRaises(ValueError):
-            server.fetch_link_details(url)
 
 
 if __name__ == "__main__":

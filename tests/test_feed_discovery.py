@@ -11,7 +11,10 @@ import server
 CHANNEL_ID = "UCabcdefghijklmnopqrstuv"
 YOUTUBE_FEED = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
 YOUTUBE_ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Not Just Bikes</title></feed>"""
-PODCAST_RSS = b"""<?xml version="1.0"?><rss><channel><title>  Example   Podcast </title></channel></rss>"""
+PODCAST_RSS = b"""<?xml version="1.0"?><rss><channel><title>  Example   Podcast </title>
+<item><title>One</title><enclosure url="https://example.test/one.mp3" type="audio/mpeg"/></item></channel></rss>"""
+BLOG_ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>A Blog</title>
+<entry><title>Post</title><link href="https://blog.example/post"/></entry></feed>"""
 
 
 def fake_fetch(responses):
@@ -31,11 +34,11 @@ class FeedDiscoveryTests(unittest.TestCase):
 
     def test_feed_url_is_used_as_is(self):
         found = self.discover("https://example.test/feed.xml", {"https://example.test/feed.xml": PODCAST_RSS})
-        self.assertEqual(found, {"feed_url": "https://example.test/feed.xml", "title": "Example Podcast"})
+        self.assertEqual(found, {"feed_url": "https://example.test/feed.xml", "title": "Example Podcast", "media": "podcast"})
 
     def test_youtube_channel_and_playlist_links_map_straight_to_feeds(self):
         found = self.discover(f"https://www.youtube.com/channel/{CHANNEL_ID}/videos", {YOUTUBE_FEED: YOUTUBE_ATOM})
-        self.assertEqual(found, {"feed_url": YOUTUBE_FEED, "title": "Not Just Bikes"})
+        self.assertEqual(found, {"feed_url": YOUTUBE_FEED, "title": "Not Just Bikes", "media": "video"})
         self.assertEqual(
             feed_discovery.youtube_feed_from_url("https://www.youtube.com/playlist?list=PL123"),
             "https://www.youtube.com/feeds/videos.xml?playlist_id=PL123",
@@ -68,7 +71,7 @@ class FeedDiscoveryTests(unittest.TestCase):
         self.assertEqual(found["feed_url"], "https://example.test/feed.xml")
 
     def test_page_without_a_feed_is_an_error(self):
-        with self.assertRaisesRegex(ValueError, "No podcast or video feed"):
+        with self.assertRaisesRegex(ValueError, "No podcast, video, or blog feed"):
             self.discover("https://plain.example/", {"https://plain.example/": b"<html><title>Plain</title></html>"})
         with self.assertRaisesRegex(ValueError, "Could not read"):
             self.discover("https://down.example/", {})

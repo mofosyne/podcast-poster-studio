@@ -54,6 +54,52 @@ class DescriptionTextParser(HTMLParser):
             self.parts.append(data)
 
 
+# Every item on a poster is a podcast episode, a video, or an article (a blog
+# post, newsletter, or any web page). Posters may mix them; each item shows its type.
+MEDIA_TYPES = ("podcast", "video", "article")
+VIDEO_HOST = re.compile(r"(^|\.)(youtube\.com|youtu\.be|vimeo\.com)$", re.I)
+AUDIO_FILE = re.compile(r"\.(mp3|m4a|aac|ogg|oga|opus|wav|flac)(\?|$)", re.I)
+
+
+def is_video_url(url):
+    try:
+        return bool(VIDEO_HOST.search(urlparse(url).hostname or ""))
+    except (TypeError, ValueError):
+        return False
+
+
+def feed_media_type(root, feed_url):
+    """What a feed publishes: YouTube or Vimeo videos, audio (a podcast), or articles."""
+    for node in root.iter():
+        if local_name(node.tag) == "media" and (node.text or "").strip() in MEDIA_TYPES:
+            return node.text.strip()  # The app's own added-item feeds say so.
+    if is_video_url(feed_url):
+        return "video"
+    for node in root.iter():
+        name = local_name(node.tag)
+        is_enclosure = name == "enclosure" or (name == "link" and node.get("rel", "").lower() == "enclosure")
+        if not is_enclosure:
+            continue
+        kind = (node.get("type") or "").lower()
+        if kind.startswith("audio/") or AUDIO_FILE.search(node.get("url") or node.get("href") or ""):
+            return "podcast"
+        if kind.startswith("video/"):
+            return "video"
+    return "article"
+
+
+def media_type_for(item):
+    """An item's media type: as recorded, or guessed from its feed or page host.
+
+    Mirrored by mediaOf() in the review page. Items saved before media types
+    existed have no type; they came from podcast feeds unless the host is a video site.
+    """
+    media = item.get("media")
+    if media in MEDIA_TYPES:
+        return media
+    return "video" if is_video_url(item.get("feed_url") or item.get("url") or "") else "podcast"
+
+
 PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -98,11 +144,13 @@ a{color:inherit;text-decoration:none}
 a:hover{color:var(--accent);text-decoration:underline}
 .meta{font-size:13px;color:var(--muted);margin-top:3px}
 .not-in-scan{font-size:12px;color:var(--orange);margin-top:3px}
-.link-note{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:4px}
-.link-note.failed{color:var(--orange)}
-.link-note button{padding:2px 9px;font-size:12px;font-weight:600}
-.link-form{padding:9px 12px;border:1px solid var(--line);border-radius:7px;background:#171c19;align-items:flex-start}
-.link-form textarea{flex:1;min-width:220px;min-height:44px;resize:vertical;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px 12px;font:inherit}
+.added-note{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:4px}
+.added-note.failed{color:var(--orange)}
+.added-note button,.added-note select{padding:2px 9px;font-size:12px;font-weight:600}
+.added-note select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;font-family:inherit}
+.filter-bar{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.filter-divider{width:1px;align-self:stretch;background:var(--line);margin:2px 4px}
+.media-badge{display:inline-block;margin-right:8px;padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:var(--text);font-size:11px;font-weight:600;vertical-align:1px}
 .description{margin-top:7px;color:var(--muted);font-size:13px;cursor:auto}
 .description summary{color:var(--accent);cursor:pointer}
 .description p{margin:5px 0 0;line-height:1.45}
@@ -142,27 +190,31 @@ html.embedded .paging{margin-bottom:6px}
 @media(max-width:600px){main{margin-top:24px;padding:0 14px}.episode{grid-template-columns:22px 52px minmax(0,1fr)}.thumbnail,.thumbnail-placeholder{width:52px;height:52px}.date,.shortlist-button{grid-column:3}.shortlist-button{justify-self:start}.tray-inner{align-items:flex-start;flex-direction:column}.tray button{width:100%}}
 </style>
 </head>
-<body data-page-version="21">
+<body data-page-version="22">
 <main>
-  <h1>Podcast episode archive</h1>
-  <p class="subtitle" id="intro">Browse the full episode history available from your subscriptions and choose up to six for the poster.</p>
-  <div class="status">__EPISODE_COUNT__ episodes from __FEED_COUNT__ feeds · __POSTED_COUNT__ previously posted · generated __GENERATED__ · __CACHE_STATUS__</div>
+  <h1>Poster Studio pick list</h1>
+  <p class="subtitle" id="intro">Browse every episode, video, and article your subscriptions provide and choose up to six for the poster.</p>
+  <div class="status">__EPISODE_COUNT__ items from __FEED_COUNT__ feeds · __POSTED_COUNT__ previously posted · generated __GENERATED__ · __CACHE_STATUS__</div>
   <div class="controls" id="controls">
-    <input id="search" type="search" placeholder="Filter by show or episode title (press / to search)" aria-label="Filter episodes by show or title">
-    <div class="view-filters" role="group" aria-label="Show episodes">
-      <button type="button" class="chip" data-filter="all" aria-pressed="true">All</button>
-      <button type="button" class="chip" data-filter="shortlist" aria-pressed="false" id="shortlistFilter" hidden>★ Shortlisted <span id="shortlistFilterCount">0</span></button>
-      <button type="button" class="chip" data-filter="links" aria-pressed="false" id="linksFilter" hidden>🔗 Links <span id="linksFilterCount">0</span></button>
-      <button type="button" class="chip" data-filter="selected" aria-pressed="false">✓ Selected <span id="selectedFilterCount">0</span></button>
-    </div>
-    <button id="addLinks" type="button" aria-expanded="false" aria-controls="linkForm" hidden>+ Add links</button>
+    <input id="search" type="search" placeholder="Filter by show, channel, or title (press / to search)" aria-label="Filter by show, channel, or title">
+    <button id="addButton" class="primary" type="button" title="Follow a channel or feed, or add a single video, episode, or article" hidden>+ Add</button>
     <button id="clear" type="button">Clear selection</button>
+    <div class="filter-bar">
+      <div class="view-filters" role="group" aria-label="Media type">
+        <button type="button" class="chip" data-media-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="chip" data-media-filter="podcast" aria-pressed="false">🎧 Podcasts <span data-media-count="podcast">0</span></button>
+        <button type="button" class="chip" data-media-filter="video" aria-pressed="false">▶ Videos <span data-media-count="video">0</span></button>
+        <button type="button" class="chip" data-media-filter="article" aria-pressed="false">📰 Articles <span data-media-count="article">0</span></button>
+      </div>
+      <span class="filter-divider" aria-hidden="true"></span>
+      <div class="view-filters" role="group" aria-label="Show">
+        <button type="button" class="chip" data-filter="all" aria-pressed="true">Everything</button>
+        <button type="button" class="chip" data-filter="shortlist" aria-pressed="false" id="shortlistFilter" hidden>★ Shortlisted <span id="shortlistFilterCount">0</span></button>
+        <button type="button" class="chip" data-filter="added" aria-pressed="false" id="addedFilter" hidden>🔗 Added <span id="addedFilterCount">0</span></button>
+        <button type="button" class="chip" data-filter="selected" aria-pressed="false">✓ Selected <span id="selectedFilterCount">0</span></button>
+      </div>
+    </div>
   </div>
-  <form class="controls link-form" id="linkForm" hidden>
-    <textarea id="linkInput" aria-label="Links to add" placeholder="Paste one or more links: YouTube or Vimeo videos, SoundCloud or Spotify episodes, articles, any web page. One per line."></textarea>
-    <button id="submitLinks" class="primary" type="submit">Add</button>
-    <div id="linkStatus" class="bulk-suggestion-status" aria-live="polite">Links are saved straight away under 🔗 Links. Titles, artwork, and descriptions are filled in after; you can shortlist or pick a link before they arrive.</div>
-  </form>
   <div class="controls ai-tools" id="aiTools" hidden>
     <span class="ai-label">AI drafts</span>
     <label class="batch-size-control" id="bulkSuggestionBatchControl" for="bulkSuggestionBatchSize">Batch size <input id="bulkSuggestionBatchSize" type="number" min="1" step="1" value="10"></label>
@@ -199,13 +251,9 @@ const nextPage = document.getElementById("nextPage");
 const shortlistFilter = document.getElementById("shortlistFilter");
 const shortlistFilterCount = document.getElementById("shortlistFilterCount");
 const selectedFilterCount = document.getElementById("selectedFilterCount");
-const linksFilter = document.getElementById("linksFilter");
-const linksFilterCount = document.getElementById("linksFilterCount");
-const addLinksButton = document.getElementById("addLinks");
-const linkForm = document.getElementById("linkForm");
-const linkInput = document.getElementById("linkInput");
-const submitLinksButton = document.getElementById("submitLinks");
-const linkStatus = document.getElementById("linkStatus");
+const addedFilter = document.getElementById("addedFilter");
+const addedFilterCount = document.getElementById("addedFilterCount");
+const addButton = document.getElementById("addButton");
 const PAGE_SIZE = 200;
 const MAX_POSTER_SELECTION = 6;
 // Embedded in the studio (server.py serves this page in an iframe), the poster draft is
@@ -243,11 +291,51 @@ let llmSuggestionsLoaded = false;
 let bulkSuggestionsRunning = false;
 let stopBulkSuggestionsRequested = false;
 let shortlistedUrls = new Set();
-let linkUrls = new Set();
-let linkFetchQueue = Promise.resolve();
-let linkFetchesWaiting = 0;
+let addedUrls = new Set();
+const fetchingUrls = new Set();
+let detailsFetchQueue = Promise.resolve();
+let mediaFilter = "all";
+try{
+  const saved = localStorage.getItem("poster-studio-media-filter");
+  if(["all", "podcast", "video", "article"].includes(saved)) mediaFilter = saved;
+}catch(error){
+  // Storage can be unavailable (private windows); the filter just starts at All.
+}
 let toastTimer = null;
 let query = "";
+
+// Mirrors media_type_for() in fetch_episodes.py: the recorded type, else a video
+// host means video; items scanned before media types existed came from podcast feeds.
+const MEDIA_INFO = {
+  podcast:{icon:"🎧", label:"Podcast", items:"episodes", placeholder:"♫", feed:"Added episodes"},
+  video:{icon:"▶", label:"Video", items:"videos", placeholder:"▶", feed:"Added videos"},
+  article:{icon:"📰", label:"Article", items:"articles", placeholder:"📰", feed:"Added articles"},
+};
+const VIDEO_HOST = /(^|\.)(youtube\.com|youtu\.be|vimeo\.com)$/i;
+function mediaOf(episode){
+  if(MEDIA_INFO[episode.media]) return episode.media;
+  try{
+    return VIDEO_HOST.test(new URL(episode.feed_url || episode.url).hostname) ? "video" : "podcast";
+  }catch(error){
+    return "podcast";
+  }
+}
+
+function inMediaFilter(episode){
+  return mediaFilter === "all" || mediaOf(episode) === mediaFilter;
+}
+
+function itemsWord(){
+  return mediaFilter === "all" ? "items" : MEDIA_INFO[mediaFilter].items;
+}
+
+function setMediaFilter(media){
+  mediaFilter = media;
+  for(const chip of document.querySelectorAll("[data-media-filter]")) chip.setAttribute("aria-pressed", String(chip.dataset.mediaFilter === media));
+  try{ localStorage.setItem("poster-studio-media-filter", media); }catch(error){ /* see above */ }
+  currentPage = 0;
+  render();
+}
 
 function postToStudio(message){
   window.parent.postMessage(message, window.location.origin);
@@ -429,7 +517,8 @@ function buildSlotForIndex(index){
     episode:episode.episode,
     date:episode.date,
     url:episode.url,
-    feed_url:episode.feed_url
+    feed_url:episode.feed_url,
+    media:mediaOf(episode)
   };
   const summaryField = reviewedSummaries.get(index);
   const summary = (summaryField ? summaryField.value : defaultPosterSummary(episode.description)).trim();
@@ -457,7 +546,8 @@ function draftSlotForIndex(index){
     episode:episode.episode,
     date:episode.date,
     url:episode.url,
-    feed_url:episode.feed_url
+    feed_url:episode.feed_url,
+    media:mediaOf(episode)
   };
   const aiDraft = episode.llm_suggestion;
   const summary = (aiDraft?.summary || episode.summary || defaultPosterSummary(episode.description)).trim().slice(0, 400);
@@ -519,159 +609,134 @@ async function loadShortlist(){
   }
 }
 
-// Hand-added links behave like episodes from a feed of their own. A link is listed
-// as soon as it is saved; its title, artwork, and description arrive once fetched.
-function linkEpisode(link){
+// Items added by hand (single videos, episodes, articles) live in one feed per
+// media type on the server. They are listed as soon as they are saved; their
+// title, artwork, and description arrive once fetched, one item at a time.
+function addedEpisode(item){
   const episode = {
-    show:String(link.show || ""),
-    episode:String(link.episode || link.url),
-    date:String(link.date || ""),
-    published_at:typeof link.published_at === "string" ? link.published_at : "",
-    added_at:typeof link.added_at === "string" ? link.added_at : "",
-    url:link.url,
-    feed_url:String(link.feed_url || ""),
-    description:typeof link.description === "string" ? link.description : "",
-    summary:typeof link.summary === "string" ? link.summary : "",
-    duration:typeof link.duration === "string" ? link.duration : "",
-    tags:Array.isArray(link.tags) ? link.tags : [],
-    is_link:true,
-    link_status:link.status || "pending",
-    link_error:typeof link.error === "string" ? link.error : "",
+    show:String(item.show || ""),
+    episode:String(item.episode || item.url),
+    date:String(item.date || ""),
+    published_at:typeof item.published_at === "string" ? item.published_at : "",
+    added_at:typeof item.added_at === "string" ? item.added_at : "",
+    url:item.url,
+    feed_url:String(item.feed_url || ""),
+    media:item.media,
+    description:typeof item.description === "string" ? item.description : "",
+    summary:typeof item.summary === "string" ? item.summary : "",
+    duration:typeof item.duration === "string" ? item.duration : "",
+    tags:Array.isArray(item.tags) ? item.tags : [],
+    is_added:true,
+    added_status:item.status || "pending",
+    added_error:typeof item.error === "string" ? item.error : "",
     not_in_scan:false,
   };
-  if(typeof link.artwork_path === "string" && link.artwork_path){
-    episode.artwork_path = link.artwork_path;
-    episode.artwork = `/cache/artwork/${encodeURIComponent(link.artwork_path.split("/").pop())}`;
+  if(typeof item.artwork_path === "string" && item.artwork_path){
+    episode.artwork_path = item.artwork_path;
+    episode.artwork = `/cache/artwork/${encodeURIComponent(item.artwork_path.split("/").pop())}`;
   }
   return episode;
 }
 
-function applyLink(link){
-  if(!link || typeof link.url !== "string") return;
-  const episode = linkEpisode(link);
-  if(episodeIndexByUrl.has(link.url)){
-    const existing = EPISODES[episodeIndexByUrl.get(link.url)];
-    // A link that is also in a feed scan keeps the feed's richer details.
-    if(existing.is_link || existing.not_in_scan) Object.assign(existing, episode);
-    else existing.is_link = true;
+function applyAddedItem(item){
+  if(!item || typeof item.url !== "string") return;
+  const episode = addedEpisode(item);
+  if(episodeIndexByUrl.has(item.url)){
+    const existing = EPISODES[episodeIndexByUrl.get(item.url)];
+    // An item that is also in a feed scan keeps the feed's richer details.
+    if(existing.is_added || existing.added_status || existing.not_in_scan) Object.assign(existing, episode);
+    else existing.is_added = true;
   } else {
     EPISODES.push(episode);
-    episodeIndexByUrl.set(link.url, EPISODES.length - 1);
+    episodeIndexByUrl.set(item.url, EPISODES.length - 1);
   }
-  linkUrls.add(link.url);
+  addedUrls.add(item.url);
 }
 
-function applyLinks(links){
-  for(const url of linkUrls){
-    if(links.some(link => link && link.url === url)) continue;
+function applyAddedItems(items){
+  for(const url of addedUrls){
+    if(items.some(item => item && item.url === url)) continue;
     const episode = EPISODES[episodeIndexByUrl.get(url)];
-    if(episode && episode.link_status){
-      episode.is_link = false;
-      episode.not_in_scan = true;
-    } else if(episode) episode.is_link = false;
+    if(!episode) continue;
+    episode.is_added = false;
+    // Removed items stay listed only while shortlisted or picked, like dropped feed episodes.
+    if(episode.added_status) episode.not_in_scan = true;
   }
-  linkUrls = new Set();
-  links.forEach(applyLink);
+  addedUrls = new Set();
+  items.forEach(applyAddedItem);
   render();
 }
 
-async function loadLinks(){
+async function loadAddedItems({reveal=false}={}){
   if(!runningInServer) return;
   try{
-    const response = await fetch("/api/links");
+    const response = await fetch("/api/added");
     if(!response.ok) return;
     const data = await response.json();
-    const links = Array.isArray(data.links) ? data.links : [];
-    applyLinks(links);
-    links.filter(link => link && link.status === "pending").forEach(link => queueLinkFetch(link.url));
+    const items = Array.isArray(data.items) ? data.items : [];
+    applyAddedItems(items);
+    items.filter(item => item && item.status === "pending" && !fetchingUrls.has(item.url)).forEach(item => queueDetailsFetch(item.url));
+    if(reveal) setViewFilter("added");
   }catch(error){
-    // Links are best-effort here; the feed episodes still work without them.
+    // Added items are best-effort here; feed episodes still work without them.
   }
 }
 
-function updateLinkStatus(message){
-  linkStatus.textContent = message || (linkFetchesWaiting
-    ? `Fetching details for ${linkFetchesWaiting} link${linkFetchesWaiting === 1 ? "" : "s"}…`
-    : "Links are saved straight away under 🔗 Links. Titles, artwork, and descriptions are filled in after; you can shortlist or pick a link before they arrive.");
+async function postAdded(path, body, fallbackError){
+  const response = await fetch(path, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)
+  });
+  const result = await response.json();
+  if(!response.ok) throw new Error(result.error || fallbackError);
+  applyAddedItems(Array.isArray(result.items) ? result.items : []);
+  if(result.shortlist_changed) loadShortlist();
+  if(result.draft_changed) postToStudio({type:"draft-refresh"});
+  return result;
 }
 
-// Fetch one link at a time so a long paste does not flood remote sites.
-function queueLinkFetch(url){
-  linkFetchesWaiting++;
-  updateLinkStatus();
+// Fetch one item at a time so a long paste does not flood remote sites.
+function queueDetailsFetch(url){
+  fetchingUrls.add(url);
   const index = episodeIndexByUrl.get(url);
-  if(index !== undefined && EPISODES[index].is_link){
-    EPISODES[index].link_status = "pending";
-    EPISODES[index].link_error = "";
+  if(index !== undefined && EPISODES[index].is_added){
+    EPISODES[index].added_status = "pending";
+    EPISODES[index].added_error = "";
   }
   render();
-  linkFetchQueue = linkFetchQueue.then(async () => {
+  detailsFetchQueue = detailsFetchQueue.then(async () => {
     try{
-      const response = await fetch("/api/links/fetch", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({url})
-      });
-      const result = await response.json();
-      if(!response.ok) throw new Error(result.error || "Could not fetch link details.");
-      applyLinks(Array.isArray(result.links) ? result.links : []);
-      if(result.shortlist_changed) loadShortlist();
-      if(result.draft_changed) postToStudio({type:"draft-refresh"});
+      await postAdded("/api/added/fetch", {url}, "Could not fetch the details.");
     }catch(error){
       const failedIndex = episodeIndexByUrl.get(url);
-      if(failedIndex !== undefined && EPISODES[failedIndex].is_link){
-        EPISODES[failedIndex].link_status = "failed";
-        EPISODES[failedIndex].link_error = error.message;
+      if(failedIndex !== undefined && EPISODES[failedIndex].is_added){
+        EPISODES[failedIndex].added_status = "failed";
+        EPISODES[failedIndex].added_error = error.message;
       }
     }finally{
-      linkFetchesWaiting--;
-      updateLinkStatus();
+      fetchingUrls.delete(url);
       render();
     }
   });
 }
 
-async function addLinks(event){
-  event.preventDefault();
-  const text = linkInput.value.trim();
-  if(!text) return;
-  submitLinksButton.disabled = true;
+async function removeAddedItem(url){
   try{
-    const response = await fetch("/api/links", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({text})
-    });
-    const result = await response.json();
-    if(!response.ok) throw new Error(result.error || "Could not add those links.");
-    linkInput.value = "";
-    applyLinks(Array.isArray(result.links) ? result.links : []);
-    const added = Array.isArray(result.added) ? result.added : [];
-    added.forEach(queueLinkFetch);
-    showToast(added.length
-      ? `Added ${added.length} link${added.length === 1 ? "" : "s"}. Find ${added.length === 1 ? "it" : "them"} under 🔗 Links.`
-      : "Those links are already in your list.");
-    setViewFilter("links");
+    await postAdded("/api/added/remove", {url}, "Could not remove that item.");
+    if(shortlistedUrls.has(url)) showToast("Removed from your added items. It stays on your shortlist until you remove it there.");
   }catch(error){
-    updateLinkStatus(error.message);
-  }finally{
-    submitLinksButton.disabled = false;
+    showToast(error.message);
   }
 }
 
-async function removeLink(url){
+async function changeAddedMedia(url, media){
   try{
-    const response = await fetch("/api/links/remove", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({url})
-    });
-    const result = await response.json();
-    if(!response.ok) throw new Error(result.error || "Could not remove that link.");
-    applyLinks(Array.isArray(result.links) ? result.links : []);
-    if(shortlistedUrls.has(url)) showToast("Link removed. It stays on your shortlist until you remove it there.");
+    await postAdded("/api/added/move", {url, media}, "Could not change the media type.");
+    showToast(`Moved to ${MEDIA_INFO[media].feed}.`);
   }catch(error){
     showToast(error.message);
+    render();
   }
 }
 
@@ -731,11 +796,14 @@ function setEpisodeSelected(index, selected){
 }
 
 function emptyMessage(){
-  if(query.trim()) return "No episodes match that filter.";
-  if(viewFilter === "shortlist") return "Nothing shortlisted yet. Use ☆ Shortlist on any episode to keep it for a later poster.";
-  if(viewFilter === "selected") return "No episodes selected yet. Tick up to six episodes for this poster.";
-  if(viewFilter === "links") return "No links yet. Use + Add links to paste a video, article, or any web page.";
-  return "No episodes found. Scan your subscriptions to build the list.";
+  const items = itemsWord();
+  if(query.trim()) return `No ${items} match that filter.`;
+  if(viewFilter === "shortlist") return `No ${items} shortlisted yet. Use ☆ Shortlist on any row to keep it for a later poster.`;
+  if(viewFilter === "selected") return `No ${items} selected yet. Tick up to six for this poster.`;
+  if(viewFilter === "added") return `No added ${items} yet. Use + Add to paste a single video, episode, or article.`;
+  return runningInServer
+    ? `No ${items} yet. Use + Add to follow a channel or feed (then scan it), or to add a single video, episode, or article.`
+    : `No ${items} found. Scan your subscriptions to build the list.`;
 }
 
 function render(){
@@ -743,13 +811,14 @@ function render(){
   const matches = EPISODES.map((episode, index) => ({episode, index})).filter(({episode, index}) => {
     if(viewFilter === "selected" && !selection.has(index)) return false;
     if(viewFilter === "shortlist" && !shortlistedUrls.has(episode.url)) return false;
-    if(viewFilter === "links" && !episode.is_link) return false;
+    if(!inMediaFilter(episode)) return false;
+    if(viewFilter === "added" && !episode.is_added) return false;
     if(viewFilter === "all" && episode.not_in_scan && !selection.has(index) && !shortlistedUrls.has(episode.url)) return false;
-    return !needle || `${episode.show} ${episode.episode} ${episode.is_link ? episode.url : ""}`.toLowerCase().includes(needle);
+    return !needle || `${episode.show} ${episode.episode} ${episode.is_added ? episode.url : ""}`.toLowerCase().includes(needle);
   });
-  // Feed episodes arrive newest first; slot links in by publish (or added) date.
+  // Feed episodes arrive newest first; slot added items in by publish (or added) date.
   // Orphans with no date stay at the end, as before.
-  if(linkUrls.size){
+  if(addedUrls.size){
     const sortTime = episode => Date.parse(episode.published_at || episode.added_at || "") || -Infinity;
     matches.sort((left, right) => sortTime(right.episode) - sortTime(left.episode) || left.index - right.index);
   }
@@ -778,7 +847,7 @@ function render(){
       else updateSelection();
     });
     row.addEventListener("click", event => {
-      if(event.target.closest("a, button, input, summary, details, label")) return;
+      if(event.target.closest("a, button, input, select, summary, details, label")) return;
       if(String(window.getSelection?.() || "").trim()) return;
       checkbox.click();
     });
@@ -794,12 +863,16 @@ function render(){
       thumbnail = document.createElement("div");
       thumbnail.className = "thumbnail-placeholder";
       thumbnail.setAttribute("aria-hidden", "true");
-      thumbnail.textContent = episode.is_link ? "🔗" : "♫";
+      thumbnail.textContent = MEDIA_INFO[mediaOf(episode)].placeholder;
     }
     const body = document.createElement("div");
     const show = document.createElement("div");
     show.className = "show";
-    show.textContent = episode.show;
+    const mediaBadge = document.createElement("span");
+    const media = MEDIA_INFO[mediaOf(episode)];
+    mediaBadge.className = "media-badge";
+    mediaBadge.textContent = `${media.icon} ${media.label}`;
+    show.append(mediaBadge, episode.show);
     if(episode.previously_posted){
       const badge = document.createElement("span");
       badge.className = "posted-badge";
@@ -825,39 +898,47 @@ function render(){
     title.append(link);
     const meta = document.createElement("div");
     meta.className = "meta";
-    if(episode.is_link) meta.textContent = episode.duration || (episode.link_status === "ready" ? "Web link" : "");
-    else meta.textContent = episode.duration ? `${episode.duration} listen` : "Duration not listed";
+    if(mediaOf(episode) === "podcast" && !episode.is_added) meta.textContent = episode.duration ? `${episode.duration} listen` : "Duration not listed";
+    else meta.textContent = episode.duration || "";
     body.append(show, title);
     if(meta.textContent) body.append(meta);
-    if(episode.is_link){
+    if(episode.is_added){
       const note = document.createElement("div");
-      note.className = episode.link_status === "failed" ? "link-note failed" : "link-note";
+      note.className = episode.added_status === "failed" ? "added-note failed" : "added-note";
       const label = document.createElement("span");
-      label.textContent = episode.link_status === "pending"
-        ? "🔗 Added link · fetching details…"
-        : episode.link_status === "failed"
-          ? `🔗 Added link · couldn't fetch details${episode.link_error ? ` (${episode.link_error})` : ""}`
-          : "🔗 Added link";
+      label.textContent = episode.added_status === "pending"
+        ? "🔗 Added · fetching details…"
+        : episode.added_status === "failed"
+          ? `🔗 Added · couldn't fetch details${episode.added_error ? ` (${episode.added_error})` : ""}`
+          : "🔗 Added";
       note.append(label);
-      if(episode.link_status !== "pending"){
+      const type = document.createElement("select");
+      type.setAttribute("aria-label", "Media type");
+      type.title = "Change the media type (moves it to that type's added feed)";
+      for(const [value, info] of Object.entries(MEDIA_INFO)){
+        type.append(new Option(`${info.icon} ${info.label}`, value, false, value === mediaOf(episode)));
+      }
+      type.addEventListener("change", () => changeAddedMedia(episode.url, type.value));
+      note.append(type);
+      if(episode.added_status !== "pending"){
         const refetch = document.createElement("button");
         refetch.type = "button";
-        refetch.textContent = episode.link_status === "failed" ? "Retry" : "Refetch details";
-        refetch.addEventListener("click", () => queueLinkFetch(episode.url));
+        refetch.textContent = episode.added_status === "failed" ? "Retry" : "Refetch details";
+        refetch.addEventListener("click", () => queueDetailsFetch(episode.url));
         note.append(refetch);
       }
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.textContent = "Remove link";
-      remove.addEventListener("click", () => removeLink(episode.url));
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => removeAddedItem(episode.url));
       note.append(remove);
       body.append(note);
     }
     if(episode.not_in_scan){
       const note = document.createElement("div");
       note.className = "not-in-scan";
-      note.textContent = episode.link_status
-        ? "Removed from your links; kept from your poster or shortlist."
+      note.textContent = episode.added_status
+        ? "Removed from your added items; kept from your poster or shortlist."
         : "No longer in the latest feed scan; kept from your poster or shortlist.";
       body.append(note);
     }
@@ -898,7 +979,7 @@ function render(){
       const details = document.createElement("details");
       details.className = "description";
       const summary = document.createElement("summary");
-      summary.textContent = "Episode description";
+      summary.textContent = mediaOf(episode) === "podcast" ? "Episode description" : "Description";
       const description = document.createElement("p");
       description.textContent = episode.description;
       details.append(summary, description);
@@ -937,11 +1018,17 @@ function updateSelection(){
   selectionLabel.textContent = `${selection.size} selected`;
   exportButton.disabled = selection.size === 0;
   selectedFilterCount.textContent = String(selection.size);
-  shortlistFilterCount.textContent = String(shortlistedUrls.size);
+  shortlistFilterCount.textContent = String(EPISODES.filter(episode => shortlistedUrls.has(episode.url) && inMediaFilter(episode)).length);
   shortlistFilter.hidden = !runningInServer;
-  linksFilterCount.textContent = String(linkUrls.size);
-  linksFilter.hidden = !runningInServer;
-  addLinksButton.hidden = !runningInServer;
+  addedFilterCount.textContent = String(EPISODES.filter(episode => episode.is_added && inMediaFilter(episode)).length);
+  addedFilter.hidden = !runningInServer;
+  addButton.hidden = !runningInServer;
+  const mediaCounts = {podcast:0, video:0, article:0};
+  for(const [index, episode] of EPISODES.entries()){
+    if(episode.not_in_scan && !selection.has(index) && !shortlistedUrls.has(episode.url)) continue;
+    mediaCounts[mediaOf(episode)]++;
+  }
+  for(const count of document.querySelectorAll("[data-media-count]")) count.textContent = String(mediaCounts[count.dataset.mediaCount]);
   updateBulkSuggestionControls();
 }
 
@@ -1176,6 +1263,7 @@ if(runningInServer){
     if(data.type === "channel-metadata" && data.metadata && typeof data.metadata === "object") applyChannelMetadata(data.metadata);
     if(data.type === "llm-settings" && data.settings && typeof data.settings === "object") applyLlmSettings(data.settings);
     if(data.type === "refresh-shortlist") loadShortlist();
+    if(data.type === "refresh-added") loadAddedItems({reveal:Boolean(data.reveal)});
   });
 } else {
   exportButton.addEventListener("click", openSelectionReview);
@@ -1192,16 +1280,12 @@ stopBulkSuggestionsButton.addEventListener("click", () => {
 render();
 if(runningInServer) loadLlmSuggestions();
 if(runningInServer) loadShortlist();
-if(runningInServer) loadLinks();
-addLinksButton.addEventListener("click", () => {
-  linkForm.hidden = !linkForm.hidden;
-  addLinksButton.setAttribute("aria-expanded", String(!linkForm.hidden));
-  if(!linkForm.hidden) linkInput.focus();
-});
-linkForm.addEventListener("submit", addLinks);
-linkInput.addEventListener("keydown", event => {
-  if(event.key === "Enter" && (event.ctrlKey || event.metaKey)) linkForm.requestSubmit();
-});
+if(runningInServer) loadAddedItems();
+addButton.addEventListener("click", () => postToStudio({type:"open-add"}));
+for(const chip of document.querySelectorAll("[data-media-filter]")){
+  chip.addEventListener("click", () => setMediaFilter(chip.dataset.mediaFilter));
+}
+setMediaFilter(mediaFilter);
 </script>
 </body>
 </html>
@@ -1246,11 +1330,9 @@ def episode_date(item):
     return None
 
 
-def format_duration(value):
-    value = value.strip()
-    if not value:
-        return None
-
+def duration_seconds(value):
+    """Seconds in an RSS, ISO 8601, or clock-style duration; None when unreadable."""
+    value = str(value or "").strip()
     seconds = None
     if value.isdecimal():
         seconds = int(value)
@@ -1271,7 +1353,13 @@ def format_duration(value):
 
     if not seconds or seconds < 0:
         return None
-    total_seconds = round(seconds)
+    return round(seconds)
+
+
+def format_duration(value):
+    total_seconds = duration_seconds(value)
+    if not total_seconds:
+        return None
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     if hours and minutes:
@@ -1457,6 +1545,7 @@ def parse_feed(feed_data, show, feed_url, now):
     root = ET.fromstring(feed_data)
     artwork_url = feed_artwork_url(root, feed_url)
     channel_description = feed_channel_description(root)
+    media = feed_media_type(root, feed_url)
     episodes = []
     for node in root.iter():
         if local_name(node.tag) not in {"item", "entry"}:
@@ -1481,6 +1570,7 @@ def parse_feed(feed_data, show, feed_url, now):
             "feed_url": feed_url,
             "artwork_url": artwork_url,
             "episode_artwork_url": episode_image_url,
+            "media": media,
         }
         if channel_description:
             episode["feed_description"] = channel_description

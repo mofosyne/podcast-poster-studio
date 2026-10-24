@@ -16,7 +16,7 @@ from urllib.error import URLError
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
 
-from fetch_episodes import USER_AGENT, cache_artwork_image, format_duration
+from fetch_episodes import USER_AGENT, cache_artwork_image, duration_seconds, format_duration
 
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 MAX_OEMBED_BYTES = 256 * 1024
@@ -254,7 +254,7 @@ def resolve_link(url, artwork_dir, now=None):
         meta.get("article:published_time"),
         meta.get("og:video:release_date"),
     ))
-    duration = format_duration(text(first_json_ld(blocks, "duration"), meta.get("duration"), meta.get("video:duration"), str(oembed.get("duration") or "")))
+    seconds = duration_seconds(text(first_json_ld(blocks, "duration"), meta.get("duration"), meta.get("video:duration"), str(oembed.get("duration") or "")))
     image_urls = [text(meta.get("og:image"), meta.get("og:image:url"), meta.get("twitter:image"))]
     video_id = youtube_video_id(url)
     if video_id:
@@ -275,8 +275,9 @@ def resolve_link(url, artwork_dir, now=None):
     if published and published <= (now or datetime.now(timezone.utc)):
         entry["date"] = display_date(published)
         entry["published_at"] = published.isoformat()
-    if duration:
-        entry["duration"] = duration
+    if seconds:
+        entry["duration_seconds"] = seconds
+        entry["duration"] = format_duration(str(seconds))
     tags = []
     for tag in page.tags if page else []:
         tag = " ".join(tag.lstrip("#").split())[:40]
@@ -290,6 +291,7 @@ def resolve_link(url, artwork_dir, now=None):
         artwork_path, _ = cache_artwork_image(image_url, artwork_dir / f"link-{digest}-v2.png")
         if artwork_path:
             entry["artwork_path"] = artwork_path
+            entry["image_url"] = image_url
             break
         warnings.append(f"artwork: could not download {image_url}")
 

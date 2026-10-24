@@ -22,7 +22,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from fetch_episodes import scan_feed
+from fetch_episodes import MEDIA_TYPES, media_type_for, scan_feed
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("PODCAST_POSTER_CONFIG", BASE_DIR / "user-data" / "config.json"))
@@ -113,9 +113,36 @@ TAG_BUBBLE_HEIGHT = 5 * mm
 TAG_BUBBLE_LINE_STEP = 6 * mm
 TAG_BUBBLE_HORIZONTAL_PADDING = 3.5
 
+# A poster may mix podcasts, videos, and articles. A single-type poster says what it
+# holds in its heading; a mixed one gets a neutral heading and a badge on each item.
+poster_kinds = {media_type_for(slot) for slot in slots}
+poster_media = next(iter(poster_kinds)) if len(poster_kinds) == 1 else "mixed"
+MEDIA_LABELS = {"podcast": "PODCAST", "video": "VIDEO", "article": "ARTICLE"}
+MEDIA_VERBS = {"podcast": "listen", "video": "watch", "article": "read"}
+POSTER_TITLES = {
+    "podcast": ("poster_title", "EPISODES WORTH LISTENING TO THIS {period}"),
+    "video": ("video_poster_title", "VIDEOS WORTH WATCHING THIS {period}"),
+    "article": ("article_poster_title", "READS WORTH YOUR TIME THIS {period}"),
+    "mixed": ("mixed_poster_title", "WORTH YOUR TIME THIS {period}"),
+}
+SINGLE_POSTER_TITLES = {
+    "podcast": ("single_poster_title", "ONE EPISODE WORTH YOUR TIME"),
+    "video": ("single_video_poster_title", "ONE VIDEO WORTH YOUR TIME"),
+    "article": ("single_article_poster_title", "ONE READ WORTH YOUR TIME"),
+}
+if poster_media == "podcast":
+    SCAN_HINT = "Scan to listen, or search for it in your preferred podcast app"
+elif poster_media == "video":
+    SCAN_HINT = "Scan to watch, or search for the title where you watch videos"
+elif poster_media == "article":
+    SCAN_HINT = "Scan to read it on your phone"
+else:
+    verbs = [MEDIA_VERBS[media] for media in MEDIA_TYPES if media in poster_kinds]
+    SCAN_HINT = f"Scan to {', '.join(verbs[:-1])} or {verbs[-1]}"
+
 if regenerate_manifest_path:
     poster_period = history_manifest.get("period", "month")
-    poster_title = history_manifest.get("title") or "Episodes worth listening to"
+    poster_title = history_manifest.get("title") or POSTER_TITLES[poster_media][1].format(period=poster_period.upper())
     edition_label = history_manifest.get("edition") or poster_period.upper()
 else:
     poster_period = config.get("poster_period", "month").lower()
@@ -129,11 +156,12 @@ else:
         week_start = now - datetime.timedelta(days=now.weekday())
         edition_label = f"WEEK OF {week_start.strftime('%B')} {week_start.day}, {week_start.year}".upper()
 
-    poster_title = (
-        config.get("single_poster_title", "ONE EPISODE WORTH YOUR TIME")
-        if poster_layout == "single"
-        else config["poster_title"].format(period=poster_period.upper())
-    )
+    if poster_layout == "single":
+        title_key, title_default = SINGLE_POSTER_TITLES[poster_media]
+        poster_title = config.get(title_key, title_default)
+    else:
+        title_key, title_default = POSTER_TITLES[poster_media]
+        poster_title = config.get(title_key, title_default).format(period=poster_period.upper())
 
 
 def project_path(config_key):
@@ -210,6 +238,7 @@ def archive_generation(pdf_path, items):
         "generated_at": generated_at.isoformat(),
         "printed_at": None,
         "title": poster_title,
+        "media": poster_media,
         "layout": poster_layout,
         "theme": poster_theme,
         "period": poster_period,
@@ -330,6 +359,54 @@ def artwork_for(item):
     except (OSError, URLError, ET.ParseError, ValueError, UnidentifiedImageError) as error:
         print(f"Artwork unavailable for {item['show']}: {error}", file=sys.stderr)
         return None
+
+
+def draw_media_icon(pdf, media, x, y, size):
+    """A small white glyph in the size x size box at (x, y): headphones, play, or page."""
+    pdf.setFillColor(colors.white)
+    pdf.setStrokeColor(colors.white)
+    pdf.setLineWidth(size * 0.13)
+    if media == "video":
+        path = pdf.beginPath()
+        path.moveTo(x + size * 0.18, y + size * 0.08)
+        path.lineTo(x + size * 0.18, y + size * 0.92)
+        path.lineTo(x + size * 0.92, y + size * 0.5)
+        path.close()
+        pdf.drawPath(path, fill=1, stroke=0)
+    elif media == "podcast":
+        pdf.arc(x + size * 0.08, y + size * 0.1, x + size * 0.92, y + size * 0.94, 0, 180)
+        pdf.roundRect(x + size * 0.02, y, size * 0.26, size * 0.48, size * 0.08, fill=1, stroke=0)
+        pdf.roundRect(x + size * 0.72, y, size * 0.26, size * 0.48, size * 0.08, fill=1, stroke=0)
+    else:
+        pdf.setLineWidth(size * 0.1)
+        pdf.rect(x + size * 0.14, y + size * 0.02, size * 0.72, size * 0.96, fill=0, stroke=1)
+        for step in (0.28, 0.5, 0.72):
+            pdf.line(x + size * 0.3, y + size * step, x + size * 0.7, y + size * step)
+
+
+def draw_media_badge(pdf, media, x, y, artwork_size):
+    """Label an item's media type on its artwork's top-left corner (mixed posters only).
+
+    Top rather than bottom: placeholder artwork prints the show name along its bottom edge.
+    """
+    font_size = 6.5 + min(1, artwork_size / (80 * mm)) * 2.5
+    label = MEDIA_LABELS[media]
+    pad = font_size * 0.55
+    icon = font_size * 1.05
+    height = font_size + pad * 1.6
+    width = pad + icon + pad * 0.8 + pdf.stringWidth(label, "Helvetica-Bold", font_size) + pad * 1.2
+    left = x + 2 * mm
+    bottom = y + artwork_size - 2 * mm - height
+    pdf.saveState()
+    pdf.setFillColor(colors.black)
+    pdf.setFillAlpha(0.78)
+    pdf.roundRect(left, bottom, width, height, height / 2, fill=1, stroke=0)
+    pdf.setFillAlpha(1)
+    draw_media_icon(pdf, media, left + pad, bottom + (height - icon) / 2, icon)
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", font_size)
+    pdf.drawString(left + pad + icon + pad * 0.8, bottom + (height - font_size * 0.72) / 2, label)
+    pdf.restoreState()
 
 
 def draw_placeholder_artwork(pdf, x, y, size, show):
@@ -553,7 +630,7 @@ def draw_single_poster(pdf, item):
 
     pdf.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
     pdf.setFont("Helvetica", 9)
-    pdf.drawCentredString(W / 2, hint_y, "Scan to listen, or search for it in your preferred podcast app")
+    pdf.drawCentredString(W / 2, hint_y, SCAN_HINT)
 
     qr_image = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
@@ -647,7 +724,7 @@ if poster_layout == "list":
     c.setFont("Helvetica", 12)
     c.setFillColor(colors.HexColor(THEME_COLORS["secondary"]))
     c.drawCentredString(
-        W / 2, H - margin - 18 * mm, "Scan to listen, or search for it in your preferred podcast app"
+        W / 2, H - margin - 18 * mm, SCAN_HINT
     )
 
 row_h = (H - margin * 2 - 28 * mm) / len(data)
@@ -686,6 +763,8 @@ for i, item in enumerate(data if poster_layout == "list" else []):
         c.drawImage(str(artwork_path), artwork_x, artwork_y, width=artwork_size, height=artwork_size, mask="auto")
     else:
         draw_placeholder_artwork(c, artwork_x, artwork_y, artwork_size, item["show"])
+    if poster_media == "mixed":
+        draw_media_badge(c, media_type_for(item), artwork_x, artwork_y, artwork_size)
 
     qr_img = qrcode.make(item["url"], border=4)
     qr_buffer = BytesIO()
